@@ -44,7 +44,7 @@ The first run decodes every video once and writes Haar faces + MFCCs under `data
 ```bash
 python train.py \
   --dataset ravdess \
-  --data-root data/raw/ravdess \
+  --data-root /media/bitwire/SER-datasets/Ravdess \
   --out-dir outputs/ravdess \
   --num-workers 8
 ```
@@ -56,11 +56,11 @@ python evaluate.py \
   --checkpoint outputs/ravdess/best.pt \
   --split test \
   --dataset ravdess \
-  --data-root data/raw/ravdess
+  --data-root /media/bitwire/SER-datasets/Ravdess
 
 python infer.py \
   --checkpoint outputs/ravdess/best.pt \
-  --video data/raw/ravdess/Actor_01/01-01-01-01-01-01-01.mp4
+  --video /media/bitwire/SER-datasets/Ravdess/Actor_01/01-01-01-01-01-01-01.mp4
 ```
 
 QAT + TFLite after the videos are in place. This trains a Keras copy from the dataset; it does not load `best.pt`.
