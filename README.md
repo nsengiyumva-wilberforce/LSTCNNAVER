@@ -39,7 +39,7 @@ Train (8 classes, speech-only, speaker split, 50 epochs, batch 16, early stoppin
 ```bash
 python train.py \
   --dataset ravdess \
-  --data-root data/raw/ravdess \
+  --data-root /media/bitwire/SER-datasets/Ravdess \
   --out-dir outputs/ravdess
 ```
 

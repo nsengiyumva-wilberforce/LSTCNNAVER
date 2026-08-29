@@ -19,7 +19,7 @@ model:
 
 data:
   dataset: ravdess                  # ravdess | savee | mead | synthetic
-  root: data/raw
+  root: /media/bitwire/SER-datasets/Ravdess
   image_size: 64                    # paper: grayscale 64x64
   grayscale: true
   num_frames: 6                     # paper: 6 video frames
