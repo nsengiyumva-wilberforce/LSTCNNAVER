@@ -8,11 +8,15 @@ Paper:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import cv2
 import librosa
 import numpy as np
+
+_VIDEO_AUDIO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".mpeg", ".mpg"}
 
 _HAAR_NAME = "haarcascade_frontalface_default.xml"
 _FACE_CASCADE: cv2.CascadeClassifier | None = None
@@ -119,6 +123,85 @@ def sample_video_frames(
     return np.stack(frames[:num_frames], axis=0)
 
 
+def load_waveform(path: str | Path, sr: int = 16000) -> np.ndarray:
+    """Load mono audio from wav/mp3 or from a video file's soundtrack.
+
+    RAVDESS Video_Speech packs are `.mp4`; libsndfile cannot decode them, so
+    this falls back to ffmpeg.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Audio/video not found: {path}")
+
+    wav_sidecar = _companion_wav(path)
+    if wav_sidecar is not None:
+        try:
+            y, _ = librosa.load(str(wav_sidecar), sr=sr, mono=True)
+            if y.size > 0:
+                return y.astype(np.float32)
+        except Exception:
+            pass
+
+    if path.suffix.lower() not in _VIDEO_AUDIO_EXTS:
+        try:
+            y, _ = librosa.load(str(path), sr=sr, mono=True)
+            if y.size > 0:
+                return y.astype(np.float32)
+        except Exception as exc:
+            raise RuntimeError(f"Could not read audio {path}: {exc}") from exc
+
+    return _ffmpeg_load(path, sr)
+
+
+def _companion_wav(path: Path) -> Path | None:
+    """Prefer a RAVDESS audio-only wav (modality 03) next to the video."""
+    same = path.with_suffix(".wav")
+    if same.is_file():
+        return same
+    parts = path.stem.split("-")
+    if len(parts) >= 7:
+        audio_stem = "-".join(["03", *parts[1:]])
+        sibling = path.parent / f"{audio_stem}.wav"
+        if sibling.is_file():
+            return sibling
+    return None
+
+
+def _ffmpeg_load(path: Path, sr: int) -> np.ndarray:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError(
+            f"Cannot decode audio from {path.name} (video files need ffmpeg). "
+            "Install ffmpeg, e.g. `sudo apt install ffmpeg`."
+        )
+    cmd = [
+        ffmpeg,
+        "-nostdin",
+        "-i",
+        str(path),
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(sr),
+        "-v",
+        "error",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg failed on {path}: {err or exc.returncode}") from exc
+    y = np.frombuffer(proc.stdout, dtype=np.float32)
+    if y.size == 0:
+        raise RuntimeError(f"ffmpeg produced empty audio for {path}")
+    return y
+
+
 def _mfcc_from_wave(
     waveform: np.ndarray,
     sr: int,
@@ -157,7 +240,7 @@ def extract_mfcc(
     max_frames: int = 128,
 ) -> np.ndarray:
     """Return CMVN-normalized MFCCs of shape (n_mfcc, max_frames)."""
-    waveform, _ = librosa.load(str(audio_path), sr=sr, mono=True)
+    waveform = load_waveform(audio_path, sr=sr)
     return _mfcc_from_wave(waveform, sr, n_mfcc, n_fft, hop_length, max_frames)
 
 
@@ -174,7 +257,7 @@ def extract_mfcc_segments(
 
     Returns (num_segments, n_mfcc, frames_per_segment).
     """
-    waveform, _ = librosa.load(str(audio_path), sr=sr, mono=True)
+    waveform = load_waveform(audio_path, sr=sr)
     if waveform.size == 0:
         waveform = np.zeros(sr, dtype=np.float32)
     length = waveform.shape[0]

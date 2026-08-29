@@ -25,9 +25,9 @@ pip install -r requirements.txt
 
 ## Train on RAVDESS
 
-Use the **audio-visual videos**, not the audio-only zip. Official pack: [Zenodo RAVDESS](https://zenodo.org/records/1188976) (`Video_Speech_Actor_*.zip`).
+Use the **audio-visual videos**, not the audio-only zip. Official pack: [Zenodo RAVDESS](https://zenodo.org/records/1188976) (`Video_Speech_Actor_*.zip`). Decoding soundtrack from `.mp4` needs **ffmpeg** (`sudo apt install ffmpeg`).
 
-Expected layout:
+Expected layout (nested `Video_Speech_Actor_XX` folders are fine):
 
 ```text
 data/raw/ravdess/Actor_01/01-01-01-01-01-01-01.mp4
