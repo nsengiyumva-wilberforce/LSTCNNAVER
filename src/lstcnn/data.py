@@ -237,21 +237,24 @@ class AudioVisualDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | int | str]:
         sample = self.samples[index]
-        faces = sample_video_frames(
-            sample.video_path,
-            num_frames=self.cfg["num_frames"],
-            image_size=self.cfg["image_size"],
-            detect_face=self.cfg["detect_face"],
-        )
-        mfcc = extract_mfcc_segments(
-            sample.audio_path,
-            num_segments=self.cfg["num_audio_segments"],
-            sr=self.cfg["sample_rate"],
-            n_mfcc=self.cfg["n_mfcc"],
-            n_fft=self.cfg["n_fft"],
-            hop_length=self.cfg["hop_length"],
-            frames_per_segment=self.cfg["mfcc_frames_per_segment"],
-        )
+        try:
+            faces = sample_video_frames(
+                sample.video_path,
+                num_frames=self.cfg["num_frames"],
+                image_size=self.cfg["image_size"],
+                detect_face=self.cfg["detect_face"],
+            )
+            mfcc = extract_mfcc_segments(
+                sample.audio_path,
+                num_segments=self.cfg["num_audio_segments"],
+                sr=self.cfg["sample_rate"],
+                n_mfcc=self.cfg["n_mfcc"],
+                n_fft=self.cfg["n_fft"],
+                hop_length=self.cfg["hop_length"],
+                frames_per_segment=self.cfg["mfcc_frames_per_segment"],
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load {sample.video_path}") from exc
         return {
             "faces": torch.from_numpy(faces),
             "mfcc": torch.from_numpy(mfcc),
