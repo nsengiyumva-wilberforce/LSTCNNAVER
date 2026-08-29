@@ -17,7 +17,7 @@ from lstcnn.cache import warm_feature_cache
 from lstcnn.constants import DATASET_EMOTIONS
 from lstcnn.data import AudioVisualDataset, SyntheticAVDataset, scan_dataset, split_samples
 from lstcnn.flops import PAPER_GFLOPS, PAPER_PARAMS_M, count_macs, gflops_from_macs
-from lstcnn.model import apply_dataset_hparams, build_model, count_parameters
+from lstcnn.preprocess import require_ffmpeg
 
 
 def set_seed(seed: int) -> None:
@@ -165,6 +165,8 @@ def evaluate_loader(
 
 def train_model(cfg: dict, device: torch.device | None = None) -> Path:
     set_seed(cfg["seed"])
+    if cfg["data"]["dataset"].lower() != "synthetic":
+        require_ffmpeg()
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     apply_dataset_hparams(cfg)
     loaders = build_dataloaders(cfg)

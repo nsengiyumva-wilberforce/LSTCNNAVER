@@ -17,6 +17,17 @@ import numpy as np
 
 _VIDEO_AUDIO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".mpeg", ".mpg"}
 
+
+def require_ffmpeg() -> str:
+    """RAVDESS Video_Speech packs are mp4; libsndfile cannot decode them."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError(
+            "ffmpeg is required to read audio from .mp4 files. "
+            "Install it with: sudo apt install ffmpeg"
+        )
+    return ffmpeg
+
 _HAAR_NAME = "haarcascade_frontalface_default.xml"
 _FACE_CASCADE: cv2.CascadeClassifier | None = None
 _CASCADE_UNAVAILABLE = False
@@ -204,13 +215,8 @@ def _probe_sample_rate(path: Path) -> int:
 
 
 def _ffmpeg_load(path: Path, sr: int | None) -> tuple[np.ndarray, int]:
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError(
-            f"Cannot decode audio from {path.name} (video files need ffmpeg). "
-            "Install ffmpeg, e.g. `sudo apt install ffmpeg`."
-        )
     used_sr = sr or _probe_sample_rate(path)
+    ffmpeg = require_ffmpeg()
     cmd = [
         ffmpeg,
         "-nostdin",
