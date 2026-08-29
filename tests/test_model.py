@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -132,3 +133,30 @@ def test_cache_key_includes_stretch():
     }
     assert cache_key(sample, cfg, None) == cache_key(sample, cfg, None)
     assert cache_key(sample, cfg, 0.8) != cache_key(sample, cfg, None)
+
+
+def test_ravdess_pairs_speech_wav(tmp_path):
+    from lstcnn.data import scan_ravdess
+
+    vdir = tmp_path / "Video_Speech_Actor_01" / "Actor_01"
+    adir = tmp_path / "Audio_Speech_Actors" / "Actor_01"
+    vdir.mkdir(parents=True)
+    adir.mkdir(parents=True)
+    (vdir / "01-01-01-01-01-01-01.mp4").write_bytes(b"x")
+    (adir / "03-01-01-01-01-01-01.wav").write_bytes(b"x")
+    samples = scan_ravdess(tmp_path)
+    assert len(samples) == 1
+    assert samples[0].video_path.endswith(".mp4")
+    assert samples[0].audio_path.endswith("03-01-01-01-01-01-01.wav")
+
+
+def test_mean_mfcc_is_zscored():
+    from lstcnn.preprocess import _mean_mfcc
+
+    sr = 16000
+    t = np.linspace(0, 1, sr, endpoint=False)
+    wave = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    vec = _mean_mfcc(wave, sr, n_mfcc=40, n_fft=2048, hop_length=512)
+    assert vec.shape == (40,)
+    assert abs(float(vec.mean())) < 1e-5
+    assert abs(float(vec.std()) - 1.0) < 1e-4

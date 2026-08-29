@@ -24,6 +24,7 @@ def cache_key(sample: Any, data_cfg: dict, time_stretch: float | None) -> str:
             str(data_cfg.get("sample_rate")),
             str(bool(data_cfg.get("detect_face", True))),
             str(time_stretch),
+            "mfcc_zscore=1",
         ]
     )
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]

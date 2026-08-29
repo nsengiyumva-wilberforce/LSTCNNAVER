@@ -33,9 +33,35 @@ def _label_maps(dataset: str) -> tuple[list[str], dict[str, int]]:
     return names, {name: i for i, name in enumerate(names)}
 
 
+def _ravdess_id_rest(stem: str) -> str | None:
+    """Fields 2–7 of 01-01-01-01-01-01-01, used to pair video (01) with wav (03)."""
+    parts = stem.split("-")
+    if len(parts) < 7:
+        return None
+    return "-".join(parts[1:])
+
+
+def _index_ravdess_wavs(root: Path) -> dict[str, Path]:
+    """Map '01-01-01-01-01-01' → Audio_Speech 03-*.wav under root."""
+    index: dict[str, Path] = {}
+    for path in root.rglob("*"):
+        if path.suffix.lower() != ".wav":
+            continue
+        rest = _ravdess_id_rest(path.stem)
+        if rest:
+            index[rest] = path
+    return index
+
+
 def scan_ravdess(root: Path, speech_only: bool = True) -> list[Sample]:
-    """Parse official RAVDESS filenames: 03-01-04-01-01-01-12.mp4."""
+    """Parse official RAVDESS filenames: 01-01-04-01-01-01-12.mp4.
+
+    Faces come from Video_Speech (modality 01). Audio prefers Audio_Speech
+    wavs (modality 03) when they exist under the same root; otherwise the
+    mp4 soundtrack is used.
+    """
     _, to_id = _label_maps("ravdess")
+    wavs = _index_ravdess_wavs(root)
     samples: list[Sample] = []
     for path in sorted(root.rglob("*")):
         if path.suffix.lower() not in VIDEO_EXTS:
@@ -46,16 +72,18 @@ def scan_ravdess(root: Path, speech_only: bool = True) -> list[Sample]:
         modality, channel, emotion_id = (int(p) for p in parts[:3])
         if speech_only and channel != 1:
             continue
-        if modality not in (1, 2):
+        if modality != 1:
             continue
         emotion = RAVDESS_ID_TO_EMOTION.get(emotion_id)
         if emotion is None:
             continue
         actor = parts[6]
+        rest = _ravdess_id_rest(path.stem)
+        audio = wavs.get(rest, path) if rest else path
         samples.append(
             Sample(
                 video_path=str(path),
-                audio_path=str(path),
+                audio_path=str(audio),
                 label=to_id[emotion],
                 speaker=f"actor_{int(actor):02d}",
                 emotion=emotion,
@@ -278,8 +306,6 @@ class AudioVisualDataset(Dataset):
         cache = self.cfg.get("cache_dir")
         self.cache_dir = Path(cache) / self.dataset_name if cache else None
         self.time_stretch = None
-        if self.augment and self.dataset_name == "ravdess":
-            self.time_stretch = float(self.cfg.get("time_stretch", 0.8))
 
     def __len__(self) -> int:
         return len(self.samples) * self.num_parts

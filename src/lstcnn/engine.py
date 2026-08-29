@@ -78,6 +78,11 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
             f"No {name} samples under {data_cfg['root']}. "
             "Download the corpus and point data.root at it, or use dataset=synthetic."
         )
+    n_wav = sum(Path(s.audio_path).suffix.lower() == ".wav" for s in samples)
+    print(
+        f"Found {len(samples)} {name} clips "
+        f"({n_wav} with .wav audio, {len(samples) - n_wav} from video soundtrack)"
+    )
     emotions = DATASET_EMOTIONS[name]
     cfg["model"]["num_classes"] = len(emotions)
     apply_dataset_hparams(cfg)
@@ -88,14 +93,16 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
         test_ratio=train_cfg["test_ratio"],
         seed=cfg["seed"],
     )
+    print(
+        f"Clips  train={len(splits['train'])}  val={len(splits['val'])}  "
+        f"test={len(splits['test'])}  (×{data_cfg.get('num_frames', 6)} windows)"
+    )
     cache_dir = data_cfg.get("cache_dir")
     if cache_dir:
         cache_path = Path(cache_dir) / name
         workers = int(train_cfg.get("num_workers", 4))
-        train_stretch = float(data_cfg.get("time_stretch", 0.8)) if name == "ravdess" else None
-        warm_feature_cache(splits["train"], data_cfg, cache_path, train_stretch, workers=workers)
-        held_out = splits["val"] + splits["test"]
-        warm_feature_cache(held_out, data_cfg, cache_path, None, workers=workers)
+        clips = splits["train"] + splits["val"] + splits["test"]
+        warm_feature_cache(clips, data_cfg, cache_path, None, workers=workers)
 
     loaders: dict[str, DataLoader] = {}
     for split, subset in splits.items():

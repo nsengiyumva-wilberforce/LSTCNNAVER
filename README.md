@@ -28,13 +28,12 @@ pip install -r requirements.txt
 
 ## Train on RAVDESS
 
-Use the **audio-visual videos**, not the audio-only zip. Official pack: [Zenodo RAVDESS](https://zenodo.org/records/1188976) (`Video_Speech_Actor_*.zip`). Decoding soundtrack from `.mp4` needs **ffmpeg** (`sudo apt install ffmpeg`).
-
-Expected layout (nested `Video_Speech_Actor_XX` folders are fine):
+Use the **Video_Speech** mp4s for faces. Optional but better: also unzip **Audio_Speech_Actors_01-24.zip** into the same root so MFCCs come from official 48 kHz wavs (same takes as the video soundtrack, no ffmpeg). Zenodo: [RAVDESS](https://zenodo.org/records/1188976).
 
 ```text
-data/raw/ravdess/Actor_01/01-01-01-01-01-01-01.mp4
-data/raw/ravdess/Actor_02/...
+/media/bitwire/SER-datasets/Ravdess/
+  Video_Speech_Actor_01/Actor_01/01-01-01-01-01-01-01.mp4
+  Audio_Speech_Actors/Actor_01/03-01-01-01-01-01-01.wav
 ```
 
 Train (8 classes, speech-only, stratified 80/20 then 80/20, batch 128, early stopping on val loss). Checkpoint: `outputs/ravdess/best.pt`. Use `split: speaker` in the config for a speaker-independent holdout.

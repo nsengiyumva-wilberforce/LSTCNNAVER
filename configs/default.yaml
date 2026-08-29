@@ -26,8 +26,8 @@ data:
   hop_length: 512
   detect_face: true
   speech_only: true
-  time_stretch: 0.8                 # RAVDESS train aug
-  cache_dir: data/cache             # skip video decode after the first run
+  time_stretch: null                # paper listed 0.8 as optional aug; always-on train/val mismatch kills audio
+  cache_dir: data/cache             # delete this folder after preprocessing changes
 
 train:
   epochs: 200

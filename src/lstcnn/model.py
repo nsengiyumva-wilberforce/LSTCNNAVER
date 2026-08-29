@@ -161,6 +161,7 @@ class LightweightSTCNN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(fusion_hidden, num_classes),
         )
+        nn.init.zeros_(self.classifier[-1].bias)
         self.num_classes = num_classes
         self.fused_dim = fused_dim
         self.fusion_hidden = fusion_hidden

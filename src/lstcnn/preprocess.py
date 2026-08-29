@@ -262,7 +262,9 @@ def _mean_mfcc(
         n_fft=n_fft,
         hop_length=hop_length,
     )
-    return mfcc.mean(axis=1).astype(np.float32)
+    vec = mfcc.mean(axis=1).astype(np.float32)
+    std = float(vec.std()) + 1e-6
+    return ((vec - vec.mean()) / std).astype(np.float32)
 
 
 def extract_mfcc_vectors(
