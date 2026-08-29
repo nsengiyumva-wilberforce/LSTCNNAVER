@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from lstcnn.preprocess import extract_mfcc_segments, sample_video_frames
+from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
 
 
 def _interpolate(baseline: torch.Tensor, input_tensor: torch.Tensor, steps: int) -> torch.Tensor:
@@ -109,17 +109,17 @@ def explain_file(
         image_size=data["image_size"],
         detect_face=data["detect_face"],
     )
-    mfcc = extract_mfcc_segments(
+    mfcc = extract_mfcc_vectors(
         audio_path or video_path,
         num_segments=data["num_audio_segments"],
-        sr=data["sample_rate"],
+        sr=data.get("sample_rate"),
         n_mfcc=data["n_mfcc"],
         n_fft=data["n_fft"],
         hop_length=data["hop_length"],
-        frames_per_segment=data["mfcc_frames_per_segment"],
     )
-    face_t = torch.from_numpy(faces).unsqueeze(0).to(device)
-    mfcc_t = torch.from_numpy(mfcc).unsqueeze(0).to(device)
+    mid = len(faces) // 2
+    face_t = torch.from_numpy(faces[mid : mid + 1]).to(device)
+    mfcc_t = torch.from_numpy(mfcc[mid : mid + 1]).to(device)
     with torch.no_grad():
         logits = model(face_t, mfcc_t)
         pred = int(logits.argmax(dim=1).item())
@@ -145,7 +145,7 @@ def explain_file(
 
 
 def _save_face_overlay(faces: np.ndarray, heatmap: np.ndarray, path: Path) -> None:
-    frame = faces[len(faces) // 2, 0]
+    frame = faces[len(faces) // 2, 0] if faces.ndim == 4 else faces[0]
     vis = (frame * 0.5 + 0.5)
     vis = np.clip(vis, 0.0, 1.0)
     fig, axes = plt.subplots(1, 2, figsize=(8, 4))

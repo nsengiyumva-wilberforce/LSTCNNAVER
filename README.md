@@ -6,14 +6,17 @@ PyTorch implementation of Ding, Tang, and Lu, *Lightweight Spatio-Temporal Convo
 
 | Item | Paper |
 | --- | --- |
-| Spatial 2D CNN | **16 → 32 → 64**, grayscale **64×64**, 3 layers |
-| Audio 1D CNN | **16 → 32**, **40 MFCCs**, 2 layers |
-| Alignment | each clip → **6 video frames** + **6 audio segments** |
+| Spatial 2D CNN | one **64×64×1** face, valid **3×3**, **16→32→64**, pool 2, flatten **2304** |
+| Audio 1D CNN | mean **40** MFCCs, valid **5×1**, **16→32**, pool 2, flatten **224** |
+| Fusion | concat → dense **16** (SAVEE **14**) → dropout → dense **8** (SAVEE **7**) |
+| Alignment | clip → **6** independent (face, MFCC) windows at one-sixth intervals |
+| Regularization | dropout **0.4** RAVDESS, **0.5** SAVEE, **0.3** MEAD |
+| Train | batch **128**, Adam 0.001, early stop Δval_loss **< 0.001** for **30** epochs |
 | Size | **0.06M** parameters, **0.014 GFLOPs** |
 | Deploy | quantization-aware training → **TFLite** |
 | Accuracy | SAVEE **97.57%**, RAVDESS **95.89%**, MEAD **98.57%** |
 
-Six grayscale frames are stacked as a 6-channel 64×64 input (one spatial forward). Six equal-length audio chunks are encoded with a shared 1D CNN so the two streams stay time-aligned.
+Each video is split into six non-overlapping windows. Every window is one training example: one Haar-cropped grayscale 64×64 face plus a 40-d mean-MFCC vector. Both branches are flattened (Fig. 3), concatenated, and classified. Training uses a class-stratified 80/20 then 80/20 split, batch size 128, and early stopping on validation loss.
 
 ## Setup
 
@@ -34,7 +37,7 @@ data/raw/ravdess/Actor_01/01-01-01-01-01-01-01.mp4
 data/raw/ravdess/Actor_02/...
 ```
 
-Train (8 classes, speech-only, speaker split, 50 epochs, batch 16, early stopping). Checkpoint: `outputs/ravdess/best.pt`.
+Train (8 classes, speech-only, stratified 80/20 then 80/20, batch 128, early stopping on val loss). Checkpoint: `outputs/ravdess/best.pt`. Use `split: speaker` in the config for a speaker-independent holdout.
 
 ```bash
 python train.py \

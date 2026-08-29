@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Dataset
 
 from lstcnn.constants import DATASET_EMOTIONS, RAVDESS_ID_TO_EMOTION, SAVEE_CODE_TO_EMOTION
-from lstcnn.preprocess import extract_mfcc_segments, sample_video_frames
+from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
@@ -190,6 +190,42 @@ def scan_dataset(name: str, root: Path, speech_only: bool = True) -> list[Sample
     raise ValueError(f"Unknown dataset '{name}'.")
 
 
+def _nested_holdout(
+    samples: list[Sample],
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    stratify: bool,
+) -> dict[str, list[Sample]]:
+    """80/20 train–test, then 80/20 train–val on the remainder (paper protocol).
+
+    `val_ratio` is the fraction of the *trainval* set used for validation.
+    """
+    from sklearn.model_selection import train_test_split
+
+    if not samples:
+        return {"train": [], "val": [], "test": []}
+
+    def _split(items: list[Sample], test_size: float, rng_seed: int) -> tuple[list[Sample], list[Sample]]:
+        if len(items) < 2 or test_size <= 0:
+            return items, []
+        labels = [s.label for s in items] if stratify else None
+        try:
+            left, right = train_test_split(
+                items,
+                test_size=test_size,
+                random_state=rng_seed,
+                stratify=labels,
+            )
+        except ValueError:
+            left, right = train_test_split(items, test_size=test_size, random_state=rng_seed)
+        return list(left), list(right)
+
+    trainval, test = _split(samples, test_ratio, seed)
+    train, val = _split(trainval, val_ratio, seed + 1)
+    return {"train": train, "val": val, "test": test}
+
+
 def split_samples(
     samples: list[Sample],
     mode: str,
@@ -197,18 +233,21 @@ def split_samples(
     test_ratio: float,
     seed: int,
 ) -> dict[str, list[Sample]]:
-    rng = random.Random(seed)
-    if mode == "random":
-        shuffled = samples[:]
-        rng.shuffle(shuffled)
-        n = len(shuffled)
-        n_test = max(1, int(n * test_ratio)) if n else 0
-        n_val = max(1, int(n * val_ratio)) if n else 0
-        test = shuffled[:n_test]
-        val = shuffled[n_test : n_test + n_val]
-        train = shuffled[n_test + n_val :]
-        return {"train": train, "val": val, "test": test}
+    """Split clips. Default `stratified` matches the paper (class-stratified nested 80/20).
 
+    `speaker` holds out whole speakers (stricter, not the paper protocol).
+    """
+    mode = mode.lower()
+    if mode in {"stratified", "random"}:
+        return _nested_holdout(
+            samples,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            stratify=mode == "stratified",
+        )
+
+    rng = random.Random(seed)
     speakers = sorted({s.speaker for s in samples})
     rng.shuffle(speakers)
     n = len(speakers)
@@ -228,36 +267,50 @@ def split_samples(
 
 
 class AudioVisualDataset(Dataset):
-    def __init__(self, samples: list[Sample], cfg: dict) -> None:
+    """Each clip is expanded into 6 aligned (face, 40-d MFCC) samples (paper §III)."""
+
+    def __init__(self, samples: list[Sample], cfg: dict, augment: bool = False) -> None:
         self.samples = samples
         self.cfg = cfg["data"]
+        self.dataset_name = cfg["data"]["dataset"].lower()
+        self.augment = augment
+        self.num_parts = int(self.cfg["num_frames"])
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.samples) * self.num_parts
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | int | str]:
-        sample = self.samples[index]
+        sample = self.samples[index // self.num_parts]
+        part = index % self.num_parts
         try:
             faces = sample_video_frames(
                 sample.video_path,
-                num_frames=self.cfg["num_frames"],
+                num_frames=self.num_parts,
                 image_size=self.cfg["image_size"],
                 detect_face=self.cfg["detect_face"],
             )
-            mfcc = extract_mfcc_segments(
+            stretch = None
+            if self.augment and self.dataset_name == "ravdess":
+                stretch = float(self.cfg.get("time_stretch", 0.8))
+            mfcc = extract_mfcc_vectors(
                 sample.audio_path,
-                num_segments=self.cfg["num_audio_segments"],
-                sr=self.cfg["sample_rate"],
+                num_segments=self.num_parts,
+                sr=self.cfg.get("sample_rate"),
                 n_mfcc=self.cfg["n_mfcc"],
                 n_fft=self.cfg["n_fft"],
                 hop_length=self.cfg["hop_length"],
-                frames_per_segment=self.cfg["mfcc_frames_per_segment"],
+                time_stretch=stretch,
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to load {sample.video_path}") from exc
+        face = faces[part]
+        vector = mfcc[part]
+        if self.augment and self.dataset_name == "ravdess":
+            noise = np.random.default_rng().normal(0.0, np.sqrt(0.01), size=face.shape)
+            face = np.clip(face + noise.astype(np.float32), -1.0, 1.0)
         return {
-            "faces": torch.from_numpy(faces),
-            "mfcc": torch.from_numpy(mfcc),
+            "faces": torch.from_numpy(face),
+            "mfcc": torch.from_numpy(vector),
             "label": sample.label,
             "speaker": sample.speaker,
             "emotion": sample.emotion,
@@ -281,17 +334,9 @@ class SyntheticAVDataset(Dataset):
         data = self.cfg
         label = index % self.num_classes
         rng = np.random.default_rng(index)
-        faces = rng.normal(0.0, 0.3, size=(data["num_frames"], 1, data["image_size"], data["image_size"]))
+        faces = rng.normal(0.0, 0.3, size=(1, data["image_size"], data["image_size"]))
         faces = np.clip(faces + 0.15 * label, -1.0, 1.0).astype(np.float32)
-        mfcc = rng.normal(
-            0.0,
-            0.3,
-            size=(
-                data["num_audio_segments"],
-                data["n_mfcc"],
-                data["mfcc_frames_per_segment"],
-            ),
-        )
+        mfcc = rng.normal(0.0, 0.3, size=(data["n_mfcc"],)).astype(np.float32)
         mfcc = (mfcc + 0.2 * label).astype(np.float32)
         emotion = DATASET_EMOTIONS["synthetic"][label]
         return {
