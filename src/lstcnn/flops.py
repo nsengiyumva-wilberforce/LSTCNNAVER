@@ -1,4 +1,4 @@
-"""MAC/FLOP counter. The paper reports 0.06M params and 0.014 GFLOPs."""
+"""MAC/FLOP counter using Ding et al. eq. (3): (2×Yh Yw Ci Co Kh Kw) + Yh Yw Co."""
 
 from __future__ import annotations
 
@@ -8,54 +8,34 @@ PAPER_PARAMS_M = 0.06
 PAPER_GFLOPS = 0.014
 
 
-def conv2d_macs(in_ch: int, out_ch: int, kernel: int, height: int, width: int) -> int:
-    return height * width * kernel * kernel * in_ch * out_ch
+def conv_flops(yh: int, yw: int, ci: int, co: int, kh: int, kw: int) -> int:
+    return (2 * yh * yw * ci * co * kh * kw) + yh * yw * co
 
 
-def conv1d_macs(in_ch: int, out_ch: int, kernel: int, length: int) -> int:
-    return length * kernel * in_ch * out_ch
-
-
-def linear_macs(in_features: int, out_features: int) -> int:
-    return in_features * out_features
+def dense_flops(width: int, neurons: int) -> int:
+    return (2 * width * neurons) + neurons
 
 
 def count_macs(
     model: LightweightSTCNN,
     image_size: int = 64,
-    mfcc_frames_per_segment: int = 32,
-    num_frames: int = 6,
     n_mfcc: int = 40,
+    **_unused,
 ) -> int:
-    """Multiply-accumulates for one clip (6 stacked frames + 6 audio segments)."""
-    macs = 0
-    vis_in = num_frames if model.stack_frames_as_channels else 1
-    repeats = 1 if model.stack_frames_as_channels else num_frames
-    h = w = image_size
-    prev = vis_in
-    for block in model.visual.backbone:
-        out_ch = block.conv.out_channels
-        k = block.conv.kernel_size[0]
-        macs += repeats * conv2d_macs(prev, out_ch, k, h, w)
-        prev = out_ch
-        h //= 2
-        w //= 2
-
-    prev = n_mfcc
-    length = mfcc_frames_per_segment
-    for block in model.audio.backbone:
-        out_ch = block.conv.out_channels
-        k = block.conv.kernel_size[0]
-        macs += num_frames * conv1d_macs(prev, out_ch, k, length)
-        prev = out_ch
-        length //= 2
-
-    from torch import nn
-
-    for lin in model.classifier.modules():
-        if isinstance(lin, nn.Linear):
-            macs += linear_macs(lin.in_features, lin.out_features)
-    return macs
+    """Paper FLOPs for one face + one 40-d MFCC vector (Fig. 3)."""
+    del image_size
+    flops = 0
+    # Spatial: 64 → 62/31 → 29/14 → 12/6  (valid 3×3, pool 2)
+    sizes = [(62, 62, 1, 16, 3, 3), (29, 29, 16, 32, 3, 3), (12, 12, 32, 64, 3, 3)]
+    for yh, yw, ci, co, kh, kw in sizes:
+        flops += conv_flops(yh, yw, ci, co, kh, kw)
+    # Temporal: 40 → 36/18 → 14/7  (valid 5×1, pool 2)
+    flops += conv_flops(36, 1, 1, 16, 5, 1)
+    flops += conv_flops(14, 1, 16, 32, 5, 1)
+    hidden = model.fusion_hidden
+    flops += dense_flops(model.fused_dim, hidden)
+    flops += dense_flops(hidden, model.num_classes)
+    return flops
 
 
 def gflops_from_macs(macs: int) -> float:

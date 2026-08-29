@@ -82,10 +82,9 @@ def main() -> None:
     model = build_keras_model(
         num_classes=cfg["model"]["num_classes"],
         image_size=data["image_size"],
-        num_frames=data["num_frames"],
         n_mfcc=data["n_mfcc"],
-        mfcc_frames_per_segment=data["mfcc_frames_per_segment"],
         dropout=cfg["model"]["dropout"],
+        fusion_hidden=cfg["model"].get("fusion_hidden", 16),
     )
     model.compile(
         optimizer=keras.optimizers.Adam(lr),

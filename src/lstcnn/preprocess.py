@@ -1,9 +1,8 @@
 """Face and MFCC preprocessing described in Ding et al. (IEEE TAFFC 2025).
 
 Paper:
-  * Faces converted to grayscale and resized to 64x64.
-  * Audio represented as 40 Mel-Frequency Cepstral Coefficients.
-  * 1D convolution is applied along the MFCC time axis.
+  * Faces: Haar crop, grayscale, 64x64; six frames at one-sixth intervals.
+  * Audio: 40 MFCCs; 1D conv along cepstral bands with a 5×1 kernel.
 """
 
 from __future__ import annotations
@@ -89,13 +88,21 @@ def prepare_face(bgr_or_gray: np.ndarray, image_size: int = 64, detect_face: boo
     return (resized.astype(np.float32) / 255.0 - 0.5) / 0.5
 
 
+def frame_indices(total: int, num_frames: int = 6) -> np.ndarray:
+    """Frame indexes at one-sixth intervals: 0, T/6, 2T/6, …, 5T/6."""
+    if total <= 0:
+        raise ValueError(f"Need a positive frame count, got {total}")
+    idx = (np.arange(num_frames, dtype=np.float64) * total / num_frames).astype(int)
+    return np.clip(idx, 0, total - 1)
+
+
 def sample_video_frames(
     video_path: str | Path,
     num_frames: int = 6,
     image_size: int = 64,
     detect_face: bool = True,
 ) -> np.ndarray:
-    """Uniformly sample `num_frames` grayscale faces from a video.
+    """Sample `num_frames` grayscale faces at one-sixth intervals.
 
     Returns an array of shape (T, 1, H, W).
     """
@@ -106,7 +113,7 @@ def sample_video_frames(
     if total <= 0:
         cap.release()
         raise RuntimeError(f"Empty video: {video_path}")
-    indices = np.linspace(0, total - 1, num=num_frames, dtype=int)
+    indices = frame_indices(total, num_frames)
     frames: list[np.ndarray] = []
     for idx in indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -123,11 +130,14 @@ def sample_video_frames(
     return np.stack(frames[:num_frames], axis=0)
 
 
-def load_waveform(path: str | Path, sr: int = 16000) -> np.ndarray:
+def load_waveform(
+    path: str | Path,
+    sr: int | None = None,
+    return_sr: bool = False,
+) -> np.ndarray | tuple[np.ndarray, int]:
     """Load mono audio from wav/mp3 or from a video file's soundtrack.
 
-    RAVDESS Video_Speech packs are `.mp4`; libsndfile cannot decode them, so
-    this falls back to ffmpeg.
+    `sr=None` keeps the source rate (paper: librosa defaults, native sampling rate).
     """
     path = Path(path)
     if not path.is_file():
@@ -136,21 +146,24 @@ def load_waveform(path: str | Path, sr: int = 16000) -> np.ndarray:
     wav_sidecar = _companion_wav(path)
     if wav_sidecar is not None:
         try:
-            y, _ = librosa.load(str(wav_sidecar), sr=sr, mono=True)
+            y, native = librosa.load(str(wav_sidecar), sr=sr, mono=True)
             if y.size > 0:
-                return y.astype(np.float32)
+                out = y.astype(np.float32)
+                return (out, int(native)) if return_sr else out
         except Exception:
             pass
 
     if path.suffix.lower() not in _VIDEO_AUDIO_EXTS:
         try:
-            y, _ = librosa.load(str(path), sr=sr, mono=True)
+            y, native = librosa.load(str(path), sr=sr, mono=True)
             if y.size > 0:
-                return y.astype(np.float32)
+                out = y.astype(np.float32)
+                return (out, int(native)) if return_sr else out
         except Exception as exc:
             raise RuntimeError(f"Could not read audio {path}: {exc}") from exc
 
-    return _ffmpeg_load(path, sr)
+    y, native = _ffmpeg_load(path, sr)
+    return (y, native) if return_sr else y
 
 
 def _companion_wav(path: Path) -> Path | None:
@@ -167,13 +180,37 @@ def _companion_wav(path: Path) -> Path | None:
     return None
 
 
-def _ffmpeg_load(path: Path, sr: int) -> np.ndarray:
+def _probe_sample_rate(path: Path) -> int:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return 48000
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=sample_rate",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=True, text=True)
+        return int(proc.stdout.strip().splitlines()[0])
+    except Exception:
+        return 48000
+
+
+def _ffmpeg_load(path: Path, sr: int | None) -> tuple[np.ndarray, int]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError(
             f"Cannot decode audio from {path.name} (video files need ffmpeg). "
             "Install ffmpeg, e.g. `sudo apt install ffmpeg`."
         )
+    used_sr = sr or _probe_sample_rate(path)
     cmd = [
         ffmpeg,
         "-nostdin",
@@ -186,7 +223,7 @@ def _ffmpeg_load(path: Path, sr: int) -> np.ndarray:
         "-ac",
         "1",
         "-ar",
-        str(sr),
+        str(used_sr),
         "-v",
         "error",
         "pipe:1",
@@ -199,17 +236,17 @@ def _ffmpeg_load(path: Path, sr: int) -> np.ndarray:
     y = np.frombuffer(proc.stdout, dtype=np.float32)
     if y.size == 0:
         raise RuntimeError(f"ffmpeg produced empty audio for {path}")
-    return y
+    return y, used_sr
 
 
-def _mfcc_from_wave(
+def _mean_mfcc(
     waveform: np.ndarray,
     sr: int,
     n_mfcc: int,
     n_fft: int,
     hop_length: int,
-    max_frames: int,
 ) -> np.ndarray:
+    """librosa MFCC (n_mfcc, time), then average over time → (n_mfcc,)."""
     if waveform.size == 0:
         waveform = np.zeros(max(sr // 10, n_fft), dtype=np.float32)
     mfcc = librosa.feature.mfcc(
@@ -219,53 +256,54 @@ def _mfcc_from_wave(
         n_fft=n_fft,
         hop_length=hop_length,
     )
-    mean = mfcc.mean(axis=1, keepdims=True)
-    std = mfcc.std(axis=1, keepdims=True) + 1e-6
-    mfcc = (mfcc - mean) / std
-    time = mfcc.shape[1]
-    if time >= max_frames:
-        mfcc = mfcc[:, :max_frames]
-    else:
-        pad = np.zeros((n_mfcc, max_frames - time), dtype=mfcc.dtype)
-        mfcc = np.concatenate([mfcc, pad], axis=1)
-    return mfcc.astype(np.float32)
+    return mfcc.mean(axis=1).astype(np.float32)
 
 
-def extract_mfcc(
+def extract_mfcc_vectors(
     audio_path: str | Path,
-    sr: int = 16000,
+    num_segments: int = 6,
+    sr: int | None = None,
     n_mfcc: int = 40,
     n_fft: int = 2048,
     hop_length: int = 512,
-    max_frames: int = 128,
+    time_stretch: float | None = None,
 ) -> np.ndarray:
-    """Return CMVN-normalized MFCCs of shape (n_mfcc, max_frames)."""
-    waveform = load_waveform(audio_path, sr=sr)
-    return _mfcc_from_wave(waveform, sr, n_mfcc, n_fft, hop_length, max_frames)
+    """Six non-overlapping windows → 40 mean MFCCs each (Fig. 2).
+
+    Returns (num_segments, n_mfcc).
+    """
+    waveform, native_sr = load_waveform(audio_path, sr=sr, return_sr=True)
+    if time_stretch is not None and abs(time_stretch - 1.0) > 1e-6 and waveform.size > 1:
+        waveform = librosa.effects.time_stretch(waveform, rate=float(time_stretch))
+    if waveform.size == 0:
+        waveform = np.zeros(max(native_sr // 10, n_fft), dtype=np.float32)
+    length = waveform.shape[0]
+    edges = np.linspace(0, length, num_segments + 1, dtype=int)
+    vectors = [
+        _mean_mfcc(waveform[edges[i] : edges[i + 1]], native_sr, n_mfcc, n_fft, hop_length)
+        for i in range(num_segments)
+    ]
+    return np.stack(vectors, axis=0)
 
 
 def extract_mfcc_segments(
     audio_path: str | Path,
     num_segments: int = 6,
-    sr: int = 16000,
+    sr: int | None = None,
     n_mfcc: int = 40,
     n_fft: int = 2048,
     hop_length: int = 512,
     frames_per_segment: int = 32,
+    time_stretch: float | None = None,
 ) -> np.ndarray:
-    """Split audio into `num_segments` equal chunks, aligned with video frames.
-
-    Returns (num_segments, n_mfcc, frames_per_segment).
-    """
-    waveform = load_waveform(audio_path, sr=sr)
-    if waveform.size == 0:
-        waveform = np.zeros(sr, dtype=np.float32)
-    length = waveform.shape[0]
-    edges = np.linspace(0, length, num_segments + 1, dtype=int)
-    segments = []
-    for i in range(num_segments):
-        chunk = waveform[edges[i] : edges[i + 1]]
-        segments.append(
-            _mfcc_from_wave(chunk, sr, n_mfcc, n_fft, hop_length, frames_per_segment)
-        )
-    return np.stack(segments, axis=0)
+    """Alias of extract_mfcc_vectors (paper averages each window to 40-d)."""
+    del frames_per_segment
+    return extract_mfcc_vectors(
+        audio_path,
+        num_segments=num_segments,
+        sr=sr,
+        n_mfcc=n_mfcc,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        time_stretch=time_stretch,
+    )

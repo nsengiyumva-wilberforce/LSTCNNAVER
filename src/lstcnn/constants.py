@@ -51,3 +51,17 @@ DATASET_EMOTIONS = {
     "mead": list(MEAD_EMOTIONS),
     "synthetic": list(RAVDESS_ID_TO_EMOTION.values()),
 }
+
+# Fig. 3 caption: dropout 0.3 / 0.4 / 0.5; dense 16 (RAVDESS/MEAD) or 14 (SAVEE).
+PAPER_DROPOUT = {"mead": 0.3, "ravdess": 0.4, "savee": 0.5, "synthetic": 0.4}
+PAPER_FUSION_HIDDEN = {"savee": 14, "ravdess": 16, "mead": 16, "synthetic": 16}
+
+
+def paper_dropout(dataset: str) -> float:
+    return PAPER_DROPOUT.get(dataset.lower(), 0.4)
+
+
+def fusion_hidden_for(dataset: str, num_classes: int) -> int:
+    if dataset.lower() == "savee" or num_classes == 7:
+        return 14
+    return PAPER_FUSION_HIDDEN.get(dataset.lower(), 16)

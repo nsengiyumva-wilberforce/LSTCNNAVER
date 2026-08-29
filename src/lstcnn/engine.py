@@ -16,7 +16,7 @@ from tqdm import tqdm
 from lstcnn.constants import DATASET_EMOTIONS
 from lstcnn.data import AudioVisualDataset, SyntheticAVDataset, scan_dataset, split_samples
 from lstcnn.flops import PAPER_GFLOPS, PAPER_PARAMS_M, count_macs, gflops_from_macs
-from lstcnn.model import build_model, count_parameters
+from lstcnn.model import apply_dataset_hparams, build_model, count_parameters
 
 
 def set_seed(seed: int) -> None:
@@ -42,17 +42,18 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
     train_cfg = cfg["train"]
     name = data_cfg["dataset"].lower()
     if name == "synthetic":
+        apply_dataset_hparams(cfg)
         loaders = {}
         split_sizes = (("train", 256, 0), ("val", 64, 1), ("test", 64, 2))
         for split, size, offset in split_sizes:
             dataset = SyntheticAVDataset(size, cfg, seed=cfg["seed"] + offset)
-            loaders[split] = DataLoader(
-                dataset,
-                batch_size=train_cfg["batch_size"],
-                shuffle=split == "train",
-                num_workers=0,
-                collate_fn=collate,
-            )
+        loaders[split] = DataLoader(
+            dataset,
+            batch_size=train_cfg["batch_size"],
+            shuffle=split == "train",
+            num_workers=0,
+            collate_fn=collate,
+        )
         return loaders
 
     samples = scan_dataset(name, Path(data_cfg["root"]), speech_only=data_cfg.get("speech_only", True))
@@ -63,6 +64,7 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
         )
     emotions = DATASET_EMOTIONS[name]
     cfg["model"]["num_classes"] = len(emotions)
+    apply_dataset_hparams(cfg)
     splits = split_samples(
         samples,
         mode=train_cfg["split"],
@@ -72,7 +74,7 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
     )
     loaders: dict[str, DataLoader] = {}
     for split, subset in splits.items():
-        dataset = AudioVisualDataset(subset, cfg)
+        dataset = AudioVisualDataset(subset, cfg, augment=split == "train")
         loaders[split] = DataLoader(
             dataset,
             batch_size=train_cfg["batch_size"],
@@ -145,6 +147,7 @@ def evaluate_loader(
 def train_model(cfg: dict, device: torch.device | None = None) -> Path:
     set_seed(cfg["seed"])
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    apply_dataset_hparams(cfg)
     loaders = build_dataloaders(cfg)
     model = build_model(cfg).to(device)
     criterion = nn.CrossEntropyLoss()
@@ -152,22 +155,24 @@ def train_model(cfg: dict, device: torch.device | None = None) -> Path:
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=train_cfg["lr"],
-        weight_decay=train_cfg["weight_decay"],
+        betas=(0.9, 0.999),
+        eps=float(train_cfg.get("adam_eps", 1e-7)),
+        weight_decay=train_cfg.get("weight_decay", 0.0),
     )
 
     out_dir = Path(train_cfg["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     best_path = out_dir / "best.pt"
-    best_acc = -1.0
+    best_loss = float("inf")
     stale = 0
     history: list[dict] = []
+    min_delta = float(train_cfg.get("min_delta", 0.001))
+    patience = int(train_cfg.get("patience", 30))
 
     n_params = count_parameters(model)
     macs = count_macs(
         model,
         image_size=cfg["data"]["image_size"],
-        mfcc_frames_per_segment=cfg["data"]["mfcc_frames_per_segment"],
-        num_frames=cfg["data"]["num_frames"],
         n_mfcc=cfg["data"]["n_mfcc"],
     )
     gflops = gflops_from_macs(macs)
@@ -185,14 +190,15 @@ def train_model(cfg: dict, device: torch.device | None = None) -> Path:
             f"epoch {epoch:03d}  train_loss={tr_loss:.4f} acc={tr_acc:.3f}  "
             f"val_loss={va_loss:.4f} acc={va_acc:.3f}"
         )
-        if va_acc > best_acc:
-            best_acc = va_acc
+        if best_loss - va_loss >= min_delta:
+            best_loss = va_loss
             stale = 0
             torch.save(
                 {
                     "model": model.state_dict(),
                     "config": cfg,
-                    "val_acc": best_acc,
+                    "val_loss": best_loss,
+                    "val_acc": va_acc,
                     "epoch": epoch,
                     "n_params": n_params,
                     "gflops": gflops,
@@ -201,8 +207,12 @@ def train_model(cfg: dict, device: torch.device | None = None) -> Path:
             )
         else:
             stale += 1
-            if stale >= train_cfg["patience"]:
-                print(f"Early stop at epoch {epoch} (best val acc {best_acc:.3f})")
+            if stale >= patience:
+                print(
+                    f"Early stop at epoch {epoch} "
+                    f"(Δval_loss < {min_delta} for {patience} epochs; "
+                    f"restored epoch {epoch - patience}, val_loss {best_loss:.4f})"
+                )
                 break
 
     ckpt = torch_load(best_path, device)
@@ -214,7 +224,8 @@ def train_model(cfg: dict, device: torch.device | None = None) -> Path:
         "params_m": n_params / 1e6,
         "gflops": gflops,
         "paper_complexity": {"params_m": PAPER_PARAMS_M, "gflops": PAPER_GFLOPS},
-        "best_val_acc": best_acc,
+        "best_val_loss": best_loss,
+        "best_val_acc": ckpt.get("val_acc"),
         "test_accuracy": test_metrics["accuracy"],
         "test_macro_f1": test_metrics["macro_f1"],
         "paper_reference": {

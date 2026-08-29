@@ -6,43 +6,41 @@ seed: 42
 
 model:
   num_classes: 8
-  # Spatial 2D CNN: 16 → 32 → 64 (paper)
   visual_channels: [16, 32, 64]
   visual_kernel: 3
-  visual_pool: flatten              # 8x8x64 after 3 pools; needed for ~0.06M params
-  # Audio 1D CNN: 16 → 32 (paper)
   audio_channels: [16, 32]
-  audio_kernel: 3
-  dropout: 0.3
-  fusion_hidden: 0                  # 0 = concat → linear (hits 0.06M)
-  stack_frames_as_channels: true    # 6 grayscale frames as 6-channel input (0.014 GFLOPs)
+  audio_kernel: 5
+  dropout: 0.4                      # RAVDESS 0.4; SAVEE 0.5; MEAD 0.3 (set from dataset)
+  fusion_hidden: 16                 # 16 RAVDESS/MEAD, 14 SAVEE (set from dataset)
 
 data:
   dataset: ravdess                  # ravdess | savee | mead | synthetic
   root: data/raw
-  image_size: 64                    # paper: grayscale 64x64
+  image_size: 64
   grayscale: true
-  num_frames: 6                     # paper: 6 video frames
-  num_audio_segments: 6             # paper: 6 audio segments, time-aligned with frames
-  n_mfcc: 40                        # paper
-  sample_rate: 16000
+  num_frames: 6                     # six one-sixth windows; each is one training sample
+  num_audio_segments: 6
+  n_mfcc: 40
+  sample_rate: null                 # paper: native source rate (RAVDESS 48 kHz)
   n_fft: 2048
   hop_length: 512
-  mfcc_frames_per_segment: 32
   detect_face: true
   speech_only: true
+  time_stretch: 0.8                 # RAVDESS train aug
 
 train:
-  epochs: 50
-  batch_size: 16
+  epochs: 200
+  batch_size: 128
   lr: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.0
+  adam_eps: 1.0e-7
   optimizer: adam
   num_workers: 4
-  val_ratio: 0.15
-  test_ratio: 0.15
-  split: speaker                    # speaker | random
-  patience: 10
+  val_ratio: 0.2
+  test_ratio: 0.2
+  split: stratified
+  patience: 30                      # Δval_loss < 0.001 for 30 epochs → restore
+  min_delta: 0.001
   out_dir: outputs
 
 explain:
@@ -51,5 +49,5 @@ explain:
 
 qat:
   epochs: 5
-  batch_size: 16
+  batch_size: 128
   lr: 0.0001
