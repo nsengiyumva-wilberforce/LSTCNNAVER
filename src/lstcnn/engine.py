@@ -13,6 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from lstcnn.cache import warm_feature_cache
 from lstcnn.constants import DATASET_EMOTIONS
 from lstcnn.data import AudioVisualDataset, SyntheticAVDataset, scan_dataset, split_samples
 from lstcnn.flops import PAPER_GFLOPS, PAPER_PARAMS_M, count_macs, gflops_from_macs
@@ -37,6 +38,21 @@ def collate(batch: list[dict]) -> dict[str, torch.Tensor | list]:
     }
 
 
+def _loader_kwargs(train_cfg: dict, shuffle: bool) -> dict:
+    workers = int(train_cfg.get("num_workers", 0))
+    kwargs: dict = {
+        "batch_size": train_cfg["batch_size"],
+        "shuffle": shuffle,
+        "num_workers": workers,
+        "collate_fn": collate,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = int(train_cfg.get("prefetch_factor", 2))
+    return kwargs
+
+
 def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
     data_cfg = cfg["data"]
     train_cfg = cfg["train"]
@@ -47,13 +63,13 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
         split_sizes = (("train", 256, 0), ("val", 64, 1), ("test", 64, 2))
         for split, size, offset in split_sizes:
             dataset = SyntheticAVDataset(size, cfg, seed=cfg["seed"] + offset)
-        loaders[split] = DataLoader(
-            dataset,
-            batch_size=train_cfg["batch_size"],
-            shuffle=split == "train",
-            num_workers=0,
-            collate_fn=collate,
-        )
+            loaders[split] = DataLoader(
+                dataset,
+                batch_size=train_cfg["batch_size"],
+                shuffle=split == "train",
+                num_workers=0,
+                collate_fn=collate,
+            )
         return loaders
 
     samples = scan_dataset(name, Path(data_cfg["root"]), speech_only=data_cfg.get("speech_only", True))
@@ -72,16 +88,19 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
         test_ratio=train_cfg["test_ratio"],
         seed=cfg["seed"],
     )
+    cache_dir = data_cfg.get("cache_dir")
+    if cache_dir:
+        cache_path = Path(cache_dir) / name
+        workers = int(train_cfg.get("num_workers", 4))
+        train_stretch = float(data_cfg.get("time_stretch", 0.8)) if name == "ravdess" else None
+        warm_feature_cache(splits["train"], data_cfg, cache_path, train_stretch, workers=workers)
+        held_out = splits["val"] + splits["test"]
+        warm_feature_cache(held_out, data_cfg, cache_path, None, workers=workers)
+
     loaders: dict[str, DataLoader] = {}
     for split, subset in splits.items():
         dataset = AudioVisualDataset(subset, cfg, augment=split == "train")
-        loaders[split] = DataLoader(
-            dataset,
-            batch_size=train_cfg["batch_size"],
-            shuffle=split == "train",
-            num_workers=train_cfg["num_workers"],
-            collate_fn=collate,
-        )
+        loaders[split] = DataLoader(dataset, **_loader_kwargs(train_cfg, split == "train"))
     return loaders
 
 

@@ -39,11 +39,14 @@ data/raw/ravdess/Actor_02/...
 
 Train (8 classes, speech-only, stratified 80/20 then 80/20, batch 128, early stopping on val loss). Checkpoint: `outputs/ravdess/best.pt`. Use `split: speaker` in the config for a speaker-independent holdout.
 
+The first run decodes every video once and writes Haar faces + MFCCs under `data/cache/ravdess`. Later epochs only read those files. Use `--num-workers 8` if the machine has spare cores.
+
 ```bash
 python train.py \
   --dataset ravdess \
   --data-root data/raw/ravdess \
-  --out-dir outputs/ravdess
+  --out-dir outputs/ravdess \
+  --num-workers 8
 ```
 
 Evaluate / infer:

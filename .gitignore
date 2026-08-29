@@ -11,6 +11,7 @@ lightweight_SER/
 
 data/raw/
 data/processed/
+data/cache/
 outputs/
 runs/
 checkpoints/

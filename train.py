@@ -23,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-classes", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--cache-dir", default=None, help="Preprocessed face/MFCC cache (default data/cache)")
     return parser.parse_args()
 
 
@@ -41,6 +43,10 @@ def main() -> None:
         cfg["train"]["batch_size"] = args.batch_size
     if args.num_classes is not None:
         cfg["model"]["num_classes"] = args.num_classes
+    if args.num_workers is not None:
+        cfg["train"]["num_workers"] = args.num_workers
+    if args.cache_dir is not None:
+        cfg["data"]["cache_dir"] = args.cache_dir
     train_model(cfg)
 
 

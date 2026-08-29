@@ -114,3 +114,21 @@ def test_stratified_nested_split():
     ids = [{id(s) for s in splits[k]} for k in ("train", "val", "test")]
     assert ids[0].isdisjoint(ids[1]) and ids[0].isdisjoint(ids[2]) and ids[1].isdisjoint(ids[2])
     assert sum(len(s) for s in splits.values()) == n
+
+
+def test_cache_key_includes_stretch():
+    from lstcnn.cache import cache_key
+    from lstcnn.data import Sample
+
+    sample = Sample("a.mp4", "a.mp4", 0, "x", "happy")
+    cfg = {
+        "image_size": 64,
+        "num_frames": 6,
+        "n_mfcc": 40,
+        "n_fft": 2048,
+        "hop_length": 512,
+        "sample_rate": None,
+        "detect_face": True,
+    }
+    assert cache_key(sample, cfg, None) == cache_key(sample, cfg, None)
+    assert cache_key(sample, cfg, 0.8) != cache_key(sample, cfg, None)

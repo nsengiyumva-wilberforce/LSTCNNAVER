@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from lstcnn.cache import load_cached_clip
 from lstcnn.constants import DATASET_EMOTIONS, RAVDESS_ID_TO_EMOTION, SAVEE_CODE_TO_EMOTION
-from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
@@ -275,6 +275,11 @@ class AudioVisualDataset(Dataset):
         self.dataset_name = cfg["data"]["dataset"].lower()
         self.augment = augment
         self.num_parts = int(self.cfg["num_frames"])
+        cache = self.cfg.get("cache_dir")
+        self.cache_dir = Path(cache) / self.dataset_name if cache else None
+        self.time_stretch = None
+        if self.augment and self.dataset_name == "ravdess":
+            self.time_stretch = float(self.cfg.get("time_stretch", 0.8))
 
     def __len__(self) -> int:
         return len(self.samples) * self.num_parts
@@ -283,28 +288,13 @@ class AudioVisualDataset(Dataset):
         sample = self.samples[index // self.num_parts]
         part = index % self.num_parts
         try:
-            faces = sample_video_frames(
-                sample.video_path,
-                num_frames=self.num_parts,
-                image_size=self.cfg["image_size"],
-                detect_face=self.cfg["detect_face"],
-            )
-            stretch = None
-            if self.augment and self.dataset_name == "ravdess":
-                stretch = float(self.cfg.get("time_stretch", 0.8))
-            mfcc = extract_mfcc_vectors(
-                sample.audio_path,
-                num_segments=self.num_parts,
-                sr=self.cfg.get("sample_rate"),
-                n_mfcc=self.cfg["n_mfcc"],
-                n_fft=self.cfg["n_fft"],
-                hop_length=self.cfg["hop_length"],
-                time_stretch=stretch,
+            faces, mfcc = load_cached_clip(
+                sample, self.cfg, self.cache_dir, self.time_stretch
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to load {sample.video_path}") from exc
-        face = faces[part]
-        vector = mfcc[part]
+        face = np.array(faces[part], copy=True)
+        vector = np.array(mfcc[part], copy=True)
         if self.augment and self.dataset_name == "ravdess":
             noise = np.random.default_rng().normal(0.0, np.sqrt(0.01), size=face.shape)
             face = np.clip(face + noise.astype(np.float32), -1.0, 1.0)
