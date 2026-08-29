@@ -63,6 +63,8 @@ def scan_ravdess(root: Path, speech_only: bool = True) -> list[Sample]:
     _, to_id = _label_maps("ravdess")
     wavs = _index_ravdess_wavs(root)
     samples: list[Sample] = []
+    skipped_video_only = 0
+    skipped_song = 0
     for path in sorted(root.rglob("*")):
         if path.suffix.lower() not in VIDEO_EXTS:
             continue
@@ -71,6 +73,10 @@ def scan_ravdess(root: Path, speech_only: bool = True) -> list[Sample]:
             continue
         modality, channel, emotion_id = (int(p) for p in parts[:3])
         if speech_only and channel != 1:
+            skipped_song += 1
+            continue
+        if modality == 2:
+            skipped_video_only += 1
             continue
         if modality != 1:
             continue
@@ -89,6 +95,12 @@ def scan_ravdess(root: Path, speech_only: bool = True) -> list[Sample]:
                 emotion=emotion,
             )
         )
+    n_wav = sum(Path(s.audio_path).suffix.lower() == ".wav" for s in samples)
+    print(
+        f"RAVDESS: kept {len(samples)} speech Audio-Video clips (paper 1440). "
+        f"Skipped {skipped_video_only} video-only and {skipped_song} song. "
+        f"Audio: {n_wav} wav / {len(samples) - n_wav} from mp4."
+    )
     return samples
 
 
