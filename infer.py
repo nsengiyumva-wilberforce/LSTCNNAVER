@@ -10,6 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.nn.functional import softmax
 
@@ -17,8 +18,9 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from lstcnn.constants import DATASET_EMOTIONS
+from lstcnn.data import apply_mfcc_scale
 from lstcnn.engine import load_checkpoint
-from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
+from lstcnn.preprocess import clip_av_windows, trim_top_db_from_cfg
 
 
 def main() -> None:
@@ -31,20 +33,22 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, cfg = load_checkpoint(args.checkpoint, device)
     data = cfg["data"]
-    faces = sample_video_frames(
+    faces, mfcc = clip_av_windows(
         args.video,
+        args.audio or args.video,
         num_frames=data["num_frames"],
         image_size=data["image_size"],
         detect_face=data["detect_face"],
-    )
-    mfcc = extract_mfcc_vectors(
-        args.audio or args.video,
-        num_segments=data["num_audio_segments"],
+        face_margin=float(data.get("face_margin", 0.0)),
+        align_face=bool(data.get("align_face", False)),
         sr=data.get("sample_rate"),
         n_mfcc=data["n_mfcc"],
         n_fft=data["n_fft"],
         hop_length=data["hop_length"],
+        time_stretch=None,
+        top_db=trim_top_db_from_cfg(data),
     )
+    mfcc = apply_mfcc_scale(mfcc, data.get("mfcc_mean"), data.get("mfcc_std"))
     with torch.no_grad():
         logits = model(
             torch.from_numpy(faces).to(device),

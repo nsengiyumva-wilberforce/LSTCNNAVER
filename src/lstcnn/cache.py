@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
+from lstcnn.preprocess import clip_av_windows, trim_top_db_from_cfg
 
 
 def cache_key(sample: Any, data_cfg: dict, time_stretch: float | None) -> str:
@@ -23,8 +23,17 @@ def cache_key(sample: Any, data_cfg: dict, time_stretch: float | None) -> str:
             str(data_cfg.get("hop_length", 512)),
             str(data_cfg.get("sample_rate")),
             str(bool(data_cfg.get("detect_face", True))),
+            str(data_cfg.get("face_margin", 0.0)),
+            str(bool(data_cfg.get("align_face", False))),
             str(time_stretch),
-            "mfcc_zscore=1",
+            str(bool(data_cfg.get("trim_silence", True))),
+            str(data_cfg.get("trim_top_db", 30)),
+            "face_unit=0-1",
+            "mfcc_raw=1",
+            "align=haar",
+            "frame=center",
+            "stretch=full_clip",
+            "trim=librosa",
         ]
     )
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
@@ -42,20 +51,20 @@ def compute_clip_features(
     time_stretch: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     n = int(data_cfg.get("num_frames", 6))
-    faces = sample_video_frames(
+    faces, mfcc = clip_av_windows(
         sample.video_path,
+        sample.audio_path,
         num_frames=n,
         image_size=int(data_cfg.get("image_size", 64)),
         detect_face=bool(data_cfg.get("detect_face", True)),
-    )
-    mfcc = extract_mfcc_vectors(
-        sample.audio_path,
-        num_segments=n,
+        face_margin=float(data_cfg.get("face_margin", 0.0)),
+        align_face=bool(data_cfg.get("align_face", False)),
         sr=data_cfg.get("sample_rate"),
         n_mfcc=int(data_cfg.get("n_mfcc", 40)),
         n_fft=int(data_cfg.get("n_fft", 2048)),
         hop_length=int(data_cfg.get("hop_length", 512)),
         time_stretch=time_stretch,
+        top_db=trim_top_db_from_cfg(data_cfg),
     )
     return faces.astype(np.float32), mfcc.astype(np.float32)
 

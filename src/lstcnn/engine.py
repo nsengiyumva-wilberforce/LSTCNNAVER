@@ -16,9 +16,17 @@ from tqdm import tqdm
 
 from lstcnn.cache import warm_feature_cache
 from lstcnn.constants import DATASET_EMOTIONS
-from lstcnn.data import AudioVisualDataset, SyntheticAVDataset, scan_dataset, split_samples
+from lstcnn.data import (
+    AudioVisualDataset,
+    SyntheticAVDataset,
+    mfcc_train_stats,
+    paper_face_noise_var,
+    paper_time_stretch,
+    scan_dataset,
+    split_samples,
+)
 from lstcnn.flops import PAPER_GFLOPS, PAPER_PARAMS_M, count_macs, gflops_from_macs
-from lstcnn.preprocess import require_ffmpeg
+from lstcnn.preprocess import face_tool_status, require_ffmpeg
 
 
 def set_seed(seed: int) -> None:
@@ -87,27 +95,62 @@ def build_dataloaders(cfg: dict) -> dict[str, DataLoader]:
     emotions = DATASET_EMOTIONS[name]
     cfg["model"]["num_classes"] = len(emotions)
     apply_dataset_hparams(cfg)
+    num_parts = int(data_cfg.get("num_frames", 6))
+    stretch = paper_time_stretch(name, data_cfg)
+    noise_var = paper_face_noise_var(name, data_cfg)
     splits = split_samples(
         samples,
         mode=train_cfg["split"],
         val_ratio=train_cfg["val_ratio"],
         test_ratio=train_cfg["test_ratio"],
         seed=cfg["seed"],
+        num_parts=num_parts,
     )
+    n_windows = sum(len(part) for part in splits.values())
     print(
-        f"Clips  train={len(splits['train'])}  val={len(splits['val'])}  "
-        f"test={len(splits['test'])}  (×{data_cfg.get('num_frames', 6)} windows)"
+        f"Windows train={len(splits['train'])}  val={len(splits['val'])}  "
+        f"test={len(splits['test'])}  (clips={len(samples)}, parts={num_parts}, "
+        f"split={train_cfg['split']}, total={n_windows})"
     )
+    tools = face_tool_status()
+    print(
+        f"Face tools: Haar={'yes' if tools['haar'] else 'NO'}  "
+        f"dlib68={'yes' if tools['dlib68'] else 'NO (pip install dlib; 68-point .dat in assets/)'}"
+    )
+    if stretch is not None or noise_var > 0.0 or bool(data_cfg.get("trim_silence", True)):
+        print(
+            f"{name.upper()} paper transforms: "
+            f"time_stretch={stretch} (train only, full clip)  "
+            f"trim_silence={bool(data_cfg.get('trim_silence', True))} "
+            f"top_db={data_cfg.get('trim_top_db', 30)}  "
+            f"face_noise_std={noise_var} (Keras GaussianNoise, train only, resampled)  "
+            f"align_face={bool(data_cfg.get('align_face', False))}"
+        )
     cache_dir = data_cfg.get("cache_dir")
-    if cache_dir:
-        cache_path = Path(cache_dir) / name
+    cache_path = Path(cache_dir) / name if cache_dir else None
+    if cache_path:
         workers = int(train_cfg.get("num_workers", 4))
-        clips = splits["train"] + splits["val"] + splits["test"]
-        warm_feature_cache(clips, data_cfg, cache_path, None, workers=workers)
+        warm_feature_cache(samples, data_cfg, cache_path, None, workers=workers)
+        if stretch is not None:
+            warm_feature_cache(samples, data_cfg, cache_path, stretch, workers=workers)
+
+    mfcc_mean, mfcc_std = mfcc_train_stats(splits["train"], data_cfg, cache_path, None)
+    cfg["data"]["mfcc_mean"] = mfcc_mean.tolist()
+    cfg["data"]["mfcc_std"] = mfcc_std.tolist()
+    print(
+        f"MFCC train-set scale: coeff0 mean={float(mfcc_mean[0]):.1f} std={float(mfcc_std[0]):.1f} "
+        f"(applied to all splits; not per-window z-score)"
+    )
 
     loaders: dict[str, DataLoader] = {}
     for split, subset in splits.items():
-        dataset = AudioVisualDataset(subset, cfg, augment=split == "train")
+        dataset = AudioVisualDataset(
+            subset,
+            cfg,
+            mfcc_mean=mfcc_mean,
+            mfcc_std=mfcc_std,
+            augment=split == "train",
+        )
         loaders[split] = DataLoader(dataset, **_loader_kwargs(train_cfg, split == "train"))
     return loaders
 
@@ -262,6 +305,7 @@ def train_model(cfg: dict, device: torch.device | None = None) -> Path:
             "RAVDESS": 0.9589,
             "MEAD": 0.9857,
         },
+        "split": train_cfg["split"],
         "history": history,
         "classification_report": test_metrics["report"],
         "confusion_matrix": test_metrics["confusion_matrix"],

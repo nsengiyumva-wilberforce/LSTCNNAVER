@@ -1,4 +1,4 @@
-"""Shared classification metrics for PyTorch and TFLite evaluation."""
+"""Shared classification metrics."""
 
 from __future__ import annotations
 

@@ -97,7 +97,7 @@ def test_one_sixth_frame_indices():
     from lstcnn.preprocess import frame_indices
 
     idx = frame_indices(60, 6)
-    assert list(idx) == [0, 10, 20, 30, 40, 50]
+    assert list(idx) == [5, 15, 25, 35, 45, 55]
 
 
 def test_stratified_nested_split():
@@ -107,7 +107,7 @@ def test_stratified_nested_split():
         Sample("v", "a", label=i % 5, speaker=str(i), emotion="e")
         for i in range(100)
     ]
-    splits = split_samples(samples, "stratified", val_ratio=0.2, test_ratio=0.2, seed=0)
+    splits = split_samples(samples, "stratified", val_ratio=0.2, test_ratio=0.2, seed=0, num_parts=1)
     n = len(samples)
     assert abs(len(splits["test"]) / n - 0.2) < 0.05
     rest = n - len(splits["test"])
@@ -115,6 +115,33 @@ def test_stratified_nested_split():
     ids = [{id(s) for s in splits[k]} for k in ("train", "val", "test")]
     assert ids[0].isdisjoint(ids[1]) and ids[0].isdisjoint(ids[2]) and ids[1].isdisjoint(ids[2])
     assert sum(len(s) for s in splits.values()) == n
+
+
+def test_paper_window_split_expands_and_can_leak_clip():
+    from lstcnn.data import Sample, split_samples
+
+    samples = [
+        Sample(f"v{i}", "a", label=i % 4, speaker="s", emotion="e")
+        for i in range(40)
+    ]
+    splits = split_samples(samples, "stratified", val_ratio=0.2, test_ratio=0.2, seed=0, num_parts=6)
+    assert sum(len(part) for part in splits.values()) == 240
+    train_clips = {item.clip.video_path for item in splits["train"]}
+    test_clips = {item.clip.video_path for item in splits["test"]}
+    assert train_clips & test_clips, "paper protocol splits windows, so clips may overlap"
+
+
+def test_clip_split_holds_out_videos():
+    from lstcnn.data import Sample, split_samples
+
+    samples = [
+        Sample(f"v{i}", "a", label=i % 4, speaker="s", emotion="e")
+        for i in range(40)
+    ]
+    splits = split_samples(samples, "clip", val_ratio=0.2, test_ratio=0.2, seed=0, num_parts=6)
+    assert sum(len(part) for part in splits.values()) == 240
+    sets = [{item.clip.video_path for item in splits[k]} for k in ("train", "val", "test")]
+    assert sets[0].isdisjoint(sets[1]) and sets[0].isdisjoint(sets[2]) and sets[1].isdisjoint(sets[2])
 
 
 def test_cache_key_includes_stretch():
@@ -135,6 +162,43 @@ def test_cache_key_includes_stretch():
     assert cache_key(sample, cfg, 0.8) != cache_key(sample, cfg, None)
 
 
+def test_trim_speech_interval_drops_holds():
+    from lstcnn.preprocess import trim_speech_interval
+
+    sr = 16000
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    speech = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    y = np.concatenate([np.zeros(sr, dtype=np.float32), speech, np.zeros(sr, dtype=np.float32)])
+    trimmed, t0, t1 = trim_speech_interval(y, sr, top_db=30)
+    assert 0.7 < t0 < 1.3
+    assert 1.7 < t1 < 2.3
+    assert trimmed.shape[0] < y.shape[0]
+
+
+def test_full_clip_stretch_then_split():
+    from lstcnn.preprocess import mfcc_vectors_from_waveform
+
+    sr = 16000
+    y = (0.2 * np.sin(2 * np.pi * 180 * np.linspace(0, 1.2, int(sr * 1.2), endpoint=False))).astype(np.float32)
+    raw = mfcc_vectors_from_waveform(y, sr, num_segments=6, n_mfcc=40, n_fft=512, hop_length=256)
+    stretched = mfcc_vectors_from_waveform(
+        y, sr, num_segments=6, n_mfcc=40, n_fft=512, hop_length=256, time_stretch=0.8
+    )
+    assert raw.shape == stretched.shape == (6, 40)
+    assert not np.allclose(raw, stretched)
+
+
+def test_eye_alignment_output_size():
+    from lstcnn.preprocess import align_face_landmarks
+
+    gray = np.zeros((200, 200), dtype=np.uint8)
+    landmarks = np.full((68, 2), 100.0, dtype=np.float32)
+    landmarks[36:42] = (70.0, 80.0)
+    landmarks[42:48] = (130.0, 80.0)
+    aligned = align_face_landmarks(gray, landmarks, image_size=64)
+    assert aligned.shape == (64, 64)
+
+
 def test_ravdess_pairs_speech_wav(tmp_path):
     from lstcnn.data import scan_ravdess
 
@@ -150,7 +214,7 @@ def test_ravdess_pairs_speech_wav(tmp_path):
     assert samples[0].audio_path.endswith("03-01-01-01-01-01-01.wav")
 
 
-def test_mean_mfcc_is_zscored():
+def test_mean_mfcc_is_raw():
     from lstcnn.preprocess import _mean_mfcc
 
     sr = 16000
@@ -158,5 +222,30 @@ def test_mean_mfcc_is_zscored():
     wave = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
     vec = _mean_mfcc(wave, sr, n_mfcc=40, n_fft=2048, hop_length=512)
     assert vec.shape == (40,)
-    assert abs(float(vec.mean())) < 1e-5
-    assert abs(float(vec.std()) - 1.0) < 1e-4
+    zscored = abs(float(vec.mean())) < 1e-5 and abs(float(vec.std()) - 1.0) < 1e-4
+    assert not zscored
+
+
+def test_prepare_face_unit_range():
+    from lstcnn.preprocess import prepare_face
+
+    gray = np.full((80, 80), 128, dtype=np.uint8)
+    face = prepare_face(gray, image_size=64, detect_face=False)
+    assert face.shape == (64, 64)
+    assert 0.0 <= float(face.min()) <= float(face.max()) <= 1.0
+    assert abs(float(face.mean()) - 128 / 255) < 1e-5
+
+
+def test_gaussian_noise_is_stddev_and_resamples():
+    from lstcnn.preprocess import apply_gaussian_noise
+
+    image = np.full((8, 8), 0.5, dtype=np.float32)
+    silent = apply_gaussian_noise(image, 0.0)
+    assert np.array_equal(silent, image)
+    a = apply_gaussian_noise(image, 0.01, seed_key=None)
+    b = apply_gaussian_noise(image, 0.01, seed_key=None)
+    assert a.shape == image.shape
+    assert not np.allclose(a, b)
+    # σ=0.01, not √0.01≈0.1: rms should be near 0.01 not 0.1.
+    rms = float(np.sqrt(np.mean((a - image) ** 2)))
+    assert 0.002 < rms < 0.03

@@ -13,7 +13,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from lstcnn.preprocess import extract_mfcc_vectors, sample_video_frames
+from lstcnn.data import apply_mfcc_scale
+from lstcnn.preprocess import clip_av_windows, trim_top_db_from_cfg
 
 
 def _interpolate(baseline: torch.Tensor, input_tensor: torch.Tensor, steps: int) -> torch.Tensor:
@@ -103,20 +104,22 @@ def explain_file(
     device: torch.device,
 ) -> dict[str, np.ndarray]:
     data = cfg["data"]
-    faces = sample_video_frames(
+    faces, mfcc = clip_av_windows(
         video_path,
+        audio_path or video_path,
         num_frames=data["num_frames"],
         image_size=data["image_size"],
         detect_face=data["detect_face"],
-    )
-    mfcc = extract_mfcc_vectors(
-        audio_path or video_path,
-        num_segments=data["num_audio_segments"],
+        face_margin=float(data.get("face_margin", 0.0)),
+        align_face=bool(data.get("align_face", False)),
         sr=data.get("sample_rate"),
         n_mfcc=data["n_mfcc"],
         n_fft=data["n_fft"],
         hop_length=data["hop_length"],
+        time_stretch=None,
+        top_db=trim_top_db_from_cfg(data),
     )
+    mfcc = apply_mfcc_scale(mfcc, data.get("mfcc_mean"), data.get("mfcc_std"))
     mid = len(faces) // 2
     face_t = torch.from_numpy(faces[mid : mid + 1]).to(device)
     mfcc_t = torch.from_numpy(mfcc[mid : mid + 1]).to(device)
@@ -146,8 +149,7 @@ def explain_file(
 
 def _save_face_overlay(faces: np.ndarray, heatmap: np.ndarray, path: Path) -> None:
     frame = faces[len(faces) // 2, 0] if faces.ndim == 4 else faces[0]
-    vis = (frame * 0.5 + 0.5)
-    vis = np.clip(vis, 0.0, 1.0)
+    vis = np.clip(frame, 0.0, 1.0)
     fig, axes = plt.subplots(1, 2, figsize=(8, 4))
     axes[0].imshow(vis, cmap="gray")
     axes[0].set_title("Input face")

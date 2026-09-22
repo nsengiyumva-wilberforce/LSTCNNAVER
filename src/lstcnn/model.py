@@ -19,6 +19,14 @@ from torch import nn
 from lstcnn.constants import fusion_hidden_for, paper_dropout
 
 
+def _keras_xavier_init(module: nn.Module) -> None:
+    """Match Keras glorot_uniform / zero bias (Conv2D, Conv1D, Dense defaults)."""
+    if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
 class ConvActPool2d(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel: int = 3) -> None:
         super().__init__()
@@ -161,6 +169,7 @@ class LightweightSTCNN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(fusion_hidden, num_classes),
         )
+        self.apply(_keras_xavier_init)
         nn.init.zeros_(self.classifier[-1].bias)
         self.num_classes = num_classes
         self.fused_dim = fused_dim

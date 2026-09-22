@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 from lstcnn.cache import load_cached_clip
 from lstcnn.constants import DATASET_EMOTIONS, RAVDESS_ID_TO_EMOTION, SAVEE_CODE_TO_EMOTION
+from lstcnn.preprocess import apply_gaussian_noise
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
@@ -26,6 +27,87 @@ class Sample:
     label: int
     speaker: str
     emotion: str
+
+
+@dataclass
+class WindowItem:
+    """One of the six aligned (face, MFCC) windows from a clip (paper §III)."""
+
+    clip: Sample
+    part: int
+
+    @property
+    def label(self) -> int:
+        return self.clip.label
+
+    @property
+    def speaker(self) -> str:
+        return self.clip.speaker
+
+    @property
+    def emotion(self) -> str:
+        return self.clip.emotion
+
+    @property
+    def video_path(self) -> str:
+        return self.clip.video_path
+
+
+def paper_time_stretch(dataset: str, data_cfg: dict) -> float | None:
+    """RAVDESS time-stretch 0.8 as train-only augmentation of the full clip."""
+    if str(dataset).lower() != "ravdess":
+        return None
+    value = data_cfg.get("time_stretch")
+    if value is None:
+        return None
+    rate = float(value)
+    if abs(rate - 1.0) < 1e-6:
+        return None
+    return rate
+
+
+def paper_face_noise_var(dataset: str, data_cfg: dict) -> float:
+    if str(dataset).lower() != "ravdess":
+        return 0.0
+    return float(data_cfg.get("face_noise_var") or 0.0)
+
+
+def mfcc_train_stats(
+    items: list[WindowItem],
+    data_cfg: dict,
+    cache_dir: Path | None,
+    time_stretch: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-coefficient mean/std on train windows. Preserves energy across clips."""
+    cache: dict[str, np.ndarray] = {}
+    rows: list[np.ndarray] = []
+    for item in items:
+        key = item.clip.video_path
+        if key not in cache:
+            _, mfcc = load_cached_clip(item.clip, data_cfg, cache_dir, time_stretch)
+            cache[key] = mfcc
+        rows.append(cache[key][item.part])
+    stacked = np.stack(rows, axis=0) if rows else np.zeros((1, int(data_cfg.get("n_mfcc", 40))), dtype=np.float32)
+    mean = stacked.mean(axis=0).astype(np.float32)
+    std = stacked.std(axis=0).astype(np.float32)
+    std = np.maximum(std, 1e-6)
+    return mean, std
+
+
+def apply_mfcc_scale(
+    mfcc: np.ndarray,
+    mean: np.ndarray | list[float] | None,
+    std: np.ndarray | list[float] | None,
+) -> np.ndarray:
+    if mean is None or std is None:
+        return mfcc
+    mean_a = np.asarray(mean, dtype=np.float32)
+    std_a = np.maximum(np.asarray(std, dtype=np.float32), 1e-6)
+    return ((mfcc - mean_a) / std_a).astype(np.float32)
+
+
+def expand_windows(samples: list[Sample], num_parts: int) -> list[WindowItem]:
+    return [WindowItem(clip=sample, part=part) for sample in samples for part in range(num_parts)]
 
 
 def _label_maps(dataset: str) -> tuple[list[str], dict[str, int]]:
@@ -231,12 +313,12 @@ def scan_dataset(name: str, root: Path, speech_only: bool = True) -> list[Sample
 
 
 def _nested_holdout(
-    samples: list[Sample],
+    samples: list,
     val_ratio: float,
     test_ratio: float,
     seed: int,
     stratify: bool,
-) -> dict[str, list[Sample]]:
+) -> dict[str, list]:
     """80/20 train–test, then 80/20 train–val on the remainder (paper protocol).
 
     `val_ratio` is the fraction of the *trainval* set used for validation.
@@ -246,7 +328,7 @@ def _nested_holdout(
     if not samples:
         return {"train": [], "val": [], "test": []}
 
-    def _split(items: list[Sample], test_size: float, rng_seed: int) -> tuple[list[Sample], list[Sample]]:
+    def _split(items: list, test_size: float, rng_seed: int) -> tuple[list, list]:
         if len(items) < 2 or test_size <= 0:
             return items, []
         labels = [s.label for s in items] if stratify else None
@@ -266,27 +348,12 @@ def _nested_holdout(
     return {"train": train, "val": val, "test": test}
 
 
-def split_samples(
+def _speaker_holdout(
     samples: list[Sample],
-    mode: str,
     val_ratio: float,
     test_ratio: float,
     seed: int,
 ) -> dict[str, list[Sample]]:
-    """Split clips. Default `stratified` matches the paper (class-stratified nested 80/20).
-
-    `speaker` holds out whole speakers (stricter, not the paper protocol).
-    """
-    mode = mode.lower()
-    if mode in {"stratified", "random"}:
-        return _nested_holdout(
-            samples,
-            val_ratio=val_ratio,
-            test_ratio=test_ratio,
-            seed=seed,
-            stratify=mode == "stratified",
-        )
-
     rng = random.Random(seed)
     speakers = sorted({s.speaker for s in samples})
     rng.shuffle(speakers)
@@ -306,36 +373,90 @@ def split_samples(
     return splits
 
 
-class AudioVisualDataset(Dataset):
-    """Each clip is expanded into 6 aligned (face, 40-d MFCC) samples (paper §III)."""
+def split_samples(
+    samples: list[Sample],
+    mode: str,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    num_parts: int = 6,
+) -> dict[str, list[WindowItem]]:
+    """Return window items. Default `stratified` matches the paper (8640 segments).
 
-    def __init__(self, samples: list[Sample], cfg: dict, augment: bool = False) -> None:
-        self.samples = samples
+    `stratified` / `random`: expand each clip to `num_parts` windows, then nested
+    80/20. Windows from the same video can land in different splits (paper protocol).
+    `clip` / `stratified_clip`: hold out whole videos, then expand.
+    `speaker`: hold out whole speakers, then expand.
+    """
+    mode = mode.lower()
+    if mode in {"clip", "stratified_clip", "random_clip"}:
+        clip_splits = _nested_holdout(
+            samples,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            stratify=mode != "random_clip",
+        )
+        return {name: expand_windows(subset, num_parts) for name, subset in clip_splits.items()}
+
+    if mode == "speaker":
+        clip_splits = _speaker_holdout(samples, val_ratio, test_ratio, seed)
+        return {name: expand_windows(subset, num_parts) for name, subset in clip_splits.items()}
+
+    windows = expand_windows(samples, num_parts)
+    if mode in {"stratified", "random"}:
+        return _nested_holdout(
+            windows,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            stratify=mode == "stratified",
+        )
+    raise ValueError(f"Unknown split mode '{mode}'. Use stratified, clip, or speaker.")
+
+
+class AudioVisualDataset(Dataset):
+    """One Haar face + 40-d mean MFCC per index (already window-expanded)."""
+
+    def __init__(
+        self,
+        items: list[WindowItem],
+        cfg: dict,
+        mfcc_mean: np.ndarray | None = None,
+        mfcc_std: np.ndarray | None = None,
+        augment: bool = False,
+    ) -> None:
+        self.items = items
         self.cfg = cfg["data"]
         self.dataset_name = cfg["data"]["dataset"].lower()
-        self.augment = augment
-        self.num_parts = int(self.cfg["num_frames"])
         cache = self.cfg.get("cache_dir")
         self.cache_dir = Path(cache) / self.dataset_name if cache else None
-        self.time_stretch = None
+        self.time_stretch = paper_time_stretch(self.dataset_name, self.cfg)
+        self.face_noise_var = paper_face_noise_var(self.dataset_name, self.cfg)
+        self.augment = bool(augment)
+        n_mfcc = int(self.cfg.get("n_mfcc", 40))
+        self.mfcc_mean = np.zeros(n_mfcc, dtype=np.float32) if mfcc_mean is None else np.asarray(mfcc_mean, dtype=np.float32)
+        self.mfcc_std = np.ones(n_mfcc, dtype=np.float32) if mfcc_std is None else np.asarray(mfcc_std, dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self.samples) * self.num_parts
+        return len(self.items)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | int | str]:
-        sample = self.samples[index // self.num_parts]
-        part = index % self.num_parts
+        item = self.items[index]
+        sample, part = item.clip, item.part
         try:
+            stretch = self.time_stretch if self.augment else None
             faces, mfcc = load_cached_clip(
-                sample, self.cfg, self.cache_dir, self.time_stretch
+                sample, self.cfg, self.cache_dir, stretch
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to load {sample.video_path}") from exc
         face = np.array(faces[part], copy=True)
         vector = np.array(mfcc[part], copy=True)
-        if self.augment and self.dataset_name == "ravdess":
-            noise = np.random.default_rng().normal(0.0, np.sqrt(0.01), size=face.shape)
-            face = np.clip(face + noise.astype(np.float32), -1.0, 1.0)
+        vector = ((vector - self.mfcc_mean) / self.mfcc_std).astype(np.float32)
+        if self.augment and self.face_noise_var > 0.0:
+            # Keras GaussianNoise(0.01): stddev 0.01, a new draw each epoch.
+            face = apply_gaussian_noise(face, self.face_noise_var)
         return {
             "faces": torch.from_numpy(face),
             "mfcc": torch.from_numpy(vector),
