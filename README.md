@@ -61,27 +61,30 @@ python infer.py \
   --checkpoint outputs/ravdess/best.pt \
   --video /media/computergeek/SER-datasets/Ravdess/Actor_01/01-01-01-01-01-01-01.mp4
 
-python realtime.py --checkpoint outputs/ravdess/best.pt
+python realtime.py --checkpoint outputs/ravdess_boost_s123/best.pt
 ```
 
 ## Realtime (webcam + mic)
 
-Needs a camera, a microphone, and `libportaudio` (`sudo apt install libportaudio2` on Debian/Ubuntu). Overlay is fused / face-only / voice-only. `q` or Esc quits.
+Needs a camera, a microphone, and `libportaudio` (`sudo apt install libportaudio2` on Debian/Ubuntu). Overlay is fused / face-only / voice-only. `q` or Esc quits. If the three boosted checkpoints exist, omitting `--checkpoint` averages them.
 
 ```bash
-python realtime.py --checkpoint outputs/ravdess/best.pt
+python realtime.py
 
-python realtime.py --checkpoint outputs/ravdess/best.pt --no-display
+python realtime.py --checkpoint outputs/ravdess_boost_s123/best.pt --no-display
 
 python realtime.py \
-  --checkpoint outputs/ravdess/best.pt \
+  --checkpoint \
+    outputs/ravdess_boost_s42/best.pt \
+    outputs/ravdess_boost_s123/best.pt \
+    outputs/ravdess_boost_s2024/best.pt \
   --camera 0 \
   --mic 0 \
   --window-sec 3 \
   --hop-sec 0.25
 ```
 
-If `outputs/ravdess/best.pt` already exists you can omit `--checkpoint`. `--no-display` prints predictions only (SSH / headless). `--camera` / `--mic` are device indexes.
+`--no-display` prints predictions only (SSH / headless). `--camera` / `--mic` are device indexes.
 
 ## Smoke test (no corpus)
 

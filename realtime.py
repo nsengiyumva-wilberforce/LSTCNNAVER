@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Live webcam + mic SER with a trained PyTorch checkpoint.
 
-Same six-window protocol as offline infer: Haar 64×64 faces and 40-d mean
-MFCCs, then fused / face-only / voice-only heads (unused branch zeroed).
+Loads paper or boosted weights from the checkpoint config. Pass several
+best.pt files to average logits (same 3-seed ensemble as evaluate.py).
 
-    python realtime.py --checkpoint outputs/ravdess/best.pt
+    python realtime.py --checkpoint outputs/ravdess_boost_s123/best.pt
 """
 
 from __future__ import annotations
@@ -26,12 +26,21 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from lstcnn.constants import DATASET_EMOTIONS
 from lstcnn.data import apply_mfcc_scale
-from lstcnn.engine import load_checkpoint
+from lstcnn.engine import _predict_logits, load_checkpoint
 from lstcnn.preprocess import frame_indices, mfcc_vectors_from_waveform, prepare_face
 
 
-def _default_checkpoint() -> Path | None:
+def _default_checkpoints() -> list[Path]:
+    ensemble = [
+        ROOT / "outputs" / "ravdess_boost_s42" / "best.pt",
+        ROOT / "outputs" / "ravdess_boost_s123" / "best.pt",
+        ROOT / "outputs" / "ravdess_boost_s2024" / "best.pt",
+    ]
+    if all(path.is_file() for path in ensemble):
+        return ensemble
     preferred = [
+        ROOT / "outputs" / "ravdess_boost_s123" / "best.pt",
+        ROOT / "outputs" / "ravdess_boost" / "best.pt",
         ROOT / "outputs" / "ravdess" / "best.pt",
         ROOT / "outputs" / "savee" / "best.pt",
         ROOT / "outputs" / "mead" / "best.pt",
@@ -39,9 +48,9 @@ def _default_checkpoint() -> Path | None:
     ]
     for path in preferred:
         if path.is_file():
-            return path
+            return [path]
     hits = sorted(ROOT.glob("outputs/**/best.pt"))
-    return hits[0] if len(hits) == 1 else None
+    return [hits[0]] if len(hits) == 1 else []
 
 
 class MicBuffer:
@@ -126,13 +135,27 @@ def _overlay(
     return out
 
 
-def _predict(model, faces: np.ndarray, mfcc: np.ndarray, device: torch.device):
+def _predict(models, faces: np.ndarray, mfcc: np.ndarray, device: torch.device, tta: bool):
     face_t = torch.from_numpy(faces).to(device)
     mfcc_t = torch.from_numpy(mfcc).to(device)
     with torch.no_grad():
-        fused_logits = model(face_t, mfcc_t)
-        vis_logits = model.forward_visual(face_t)
-        aud_logits = model.forward_audio(mfcc_t)
+        fused_logits = None
+        vis_logits = None
+        aud_logits = None
+        for model in models:
+            part = _predict_logits(model, face_t, mfcc_t, tta=tta)
+            fused_logits = part if fused_logits is None else fused_logits + part
+            vis_part = model.forward_visual(face_t)
+            aud_part = model.forward_audio(mfcc_t)
+            if tta:
+                flipped = torch.flip(face_t, dims=[-1])
+                vis_part = 0.5 * (vis_part + model.forward_visual(flipped))
+            vis_logits = vis_part if vis_logits is None else vis_logits + vis_part
+            aud_logits = aud_part if aud_logits is None else aud_logits + aud_part
+        scale = 1.0 / len(models)
+        fused_logits = fused_logits * scale
+        vis_logits = vis_logits * scale
+        aud_logits = aud_logits * scale
         fused = softmax(fused_logits.mean(dim=0, keepdim=True), dim=1)[0].cpu().numpy()
         visual = softmax(vis_logits.mean(dim=0, keepdim=True), dim=1)[0].cpu().numpy()
         audio = softmax(aud_logits.mean(dim=0, keepdim=True), dim=1)[0].cpu().numpy()
@@ -143,7 +166,12 @@ def _predict(model, faces: np.ndarray, mfcc: np.ndarray, device: torch.device):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live webcam + mic SER (PyTorch)")
-    parser.add_argument("--checkpoint", default=None, help="Path to best.pt from train.py")
+    parser.add_argument(
+        "--checkpoint",
+        nargs="*",
+        default=None,
+        help="One or more best.pt files (several = logit ensemble)",
+    )
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--window-sec", type=float, default=3.0, help="Rolling clip length (six windows)")
     parser.add_argument("--hop-sec", type=float, default=0.25, help="Seconds between inferences")
@@ -151,11 +179,13 @@ def main() -> None:
     parser.add_argument("--no-display", action="store_true", help="Print predictions only (no OpenCV window)")
     args = parser.parse_args()
 
-    ckpt = Path(args.checkpoint) if args.checkpoint else _default_checkpoint()
-    if ckpt is None or not ckpt.is_file():
+    ckpts = [Path(p) for p in args.checkpoint] if args.checkpoint else _default_checkpoints()
+    missing = [str(p) for p in ckpts if not p.is_file()]
+    if not ckpts or missing:
         raise SystemExit(
             "Pass --checkpoint path/to/best.pt "
-            "(or train first so outputs/ravdess/best.pt exists)."
+            "(boosted defaults: outputs/ravdess_boost_s42|s123|s2024/best.pt)."
+            + (f" Missing: {', '.join(missing)}" if missing else "")
         )
 
     try:
@@ -164,7 +194,12 @@ def main() -> None:
         raise SystemExit("Install sounddevice for the microphone: pip install sounddevice") from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, cfg = load_checkpoint(ckpt, device)
+    models = []
+    cfg = None
+    for path in ckpts:
+        model, cfg = load_checkpoint(path, device)
+        models.append(model)
+    assert cfg is not None
     data = cfg["data"]
     dataset = str(data.get("dataset", "")).lower()
     names = DATASET_EMOTIONS.get(dataset, [str(i) for i in range(cfg["model"]["num_classes"])])
@@ -176,6 +211,8 @@ def main() -> None:
     align_face = bool(data.get("align_face", False))
     sr = int(data["sample_rate"] or 48000)
     stretch = None  # paper stretch is train-only; live audio is already speech
+    tta = bool(cfg.get("train", {}).get("tta", False))
+    kind = "Boosted ST-CNN" if cfg.get("model", {}).get("boost") else "LST-CNN (Fig. 3)"
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -195,7 +232,12 @@ def main() -> None:
     face_buf: deque[np.ndarray] = deque(maxlen=max(int(30 * args.window_sec), num_frames))
     last_infer = 0.0
     last_overlay = None
-    print(f"Realtime SER  checkpoint={ckpt}  device={device}  mic={sr} Hz  q=quit")
+    print(
+        f"Realtime SER  {kind}  checkpoints={len(models)}  tta={tta}  "
+        f"device={device}  mic={sr} Hz  q=quit"
+    )
+    for path in ckpts:
+        print(f"  {path}")
 
     try:
         while True:
@@ -225,7 +267,7 @@ def main() -> None:
                     time_stretch=stretch,
                 )
                 mfcc = apply_mfcc_scale(mfcc, data.get("mfcc_mean"), data.get("mfcc_std"))
-                fused, visual, audio, agree = _predict(model, faces, mfcc, device)
+                fused, visual, audio, agree = _predict(models, faces, mfcc, device, tta)
                 last_overlay = (fused, visual, audio, agree)
                 last_infer = now
                 fi = int(fused.argmax())
