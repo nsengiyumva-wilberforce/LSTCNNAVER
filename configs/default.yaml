@@ -12,6 +12,9 @@ model:
   audio_kernel: 5
   dropout: 0.4                      # RAVDESS 0.4; SAVEE 0.5; MEAD 0.3 (set from dataset)
   fusion_hidden: 16                 # 16 RAVDESS/MEAD, 14 SAVEE (set from dataset)
+  boost: true                       # residual+SE visual, gated fusion (chase paper 95.89)
+  boost_dropout: 0.3
+  boost_fusion: 64
 
 data:
   dataset: ravdess                  # ravdess | savee | mead | synthetic
@@ -31,23 +34,33 @@ data:
   trim_silence: true                # RAVDESS ~1s head/tail holds; all six windows are speech
   trim_top_db: 30
   time_stretch: 0.8                 # RAVDESS: train-only, full trimmed clip, then six windows
-  face_noise_var: 0.01              # RAVDESS: Keras GaussianNoise stddev (train only, resampled)
+  face_noise_var: 0.01              # RAVDESS: GaussianNoise stddev (train only, resampled)
+  face_aug: true                    # train-only horizontal flip + mild brightness
+  mfcc_aug: false
   cache_dir: data/cache             # delete this folder after preprocessing changes
 
 train:
   epochs: 1000
   batch_size: 128
   lr: 0.001
-  weight_decay: 0.0
+  weight_decay: 1.0e-4
   adam_eps: 1.0e-7
-  optimizer: adam
+  optimizer: adamw
+  lr_schedule: cosine
+  cosine_tmax: 200
   num_workers: 8
   prefetch_factor: 2
   val_ratio: 0.2
   test_ratio: 0.2
   split: stratified                 # paper: 8640 windows; clip = utterance holdout
-  patience: 30                      # Δval_loss < 0.001 for 30 epochs → restore
+  patience: 40
   min_delta: 0.001
+  monitor: val_acc                  # keep the most accurate val snapshot
+  label_smoothing: 0.0
+  mixup: 0.0
+  ema: 0.0
+  tta: true                         # average logits of face and horizontal flip
+  class_weight: false
   out_dir: outputs
 
 explain:

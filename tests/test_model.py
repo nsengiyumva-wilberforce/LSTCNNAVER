@@ -19,6 +19,7 @@ def _cfg():
     cfg = load_config(ROOT / "configs" / "default.yaml")
     cfg["data"]["dataset"] = "synthetic"
     cfg["model"]["num_classes"] = 8
+    cfg["model"]["boost"] = False
     apply_dataset_hparams(cfg)
     return cfg
 
@@ -249,3 +250,39 @@ def test_gaussian_noise_is_stddev_and_resamples():
     # σ=0.01, not √0.01≈0.1: rms should be near 0.01 not 0.1.
     rms = float(np.sqrt(np.mean((a - image) ** 2)))
     assert 0.002 < rms < 0.03
+
+
+def test_augment_face_keeps_shape():
+    from lstcnn.data import augment_face, augment_mfcc
+
+    face = np.random.rand(1, 64, 64).astype(np.float32)
+    assert augment_face(face).shape == face.shape
+    assert augment_mfcc(np.random.randn(40).astype(np.float32)).shape == (40,)
+
+
+def test_boosted_complexity_is_nonzero():
+    from lstcnn.flops import model_complexity
+
+    cfg = _cfg()
+    cfg["model"]["boost"] = True
+    apply_dataset_hparams(cfg)
+    stats = model_complexity(build_model(cfg))
+    assert stats["n_params"] > 100_000
+    assert stats["gflops"] > 0.01
+    assert stats["visual_params"] > stats["audio_params"]
+
+
+def test_boosted_forward_shapes():
+    cfg = _cfg()
+    cfg["model"]["boost"] = True
+    apply_dataset_hparams(cfg)
+    model = build_model(cfg)
+    model.eval()
+    faces = torch.randn(3, 1, 64, 64)
+    mfcc = torch.randn(3, 40)
+    logits = model(faces, mfcc)
+    assert logits.shape == (3, 8)
+    assert model.forward_visual(faces).shape == (3, 8)
+    assert model.forward_audio(mfcc).shape == (3, 8)
+    assert getattr(model, "is_boosted", False)
+

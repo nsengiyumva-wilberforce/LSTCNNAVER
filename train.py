@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--cache-dir", default=None, help="Preprocessed face/MFCC cache (default data/cache)")
+    parser.add_argument("--model-seed", type=int, default=None, help="Init/training seed (split still uses config seed)")
     return parser.parse_args()
 
 
@@ -47,6 +48,8 @@ def main() -> None:
         cfg["train"]["num_workers"] = args.num_workers
     if args.cache_dir is not None:
         cfg["data"]["cache_dir"] = args.cache_dir
+    if args.model_seed is not None:
+        cfg["train"]["model_seed"] = args.model_seed
     train_model(cfg)
 
 

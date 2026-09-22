@@ -14,28 +14,45 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from lstcnn.constants import DATASET_EMOTIONS
-from lstcnn.engine import build_dataloaders, evaluate_loader, load_checkpoint
+from lstcnn.engine import build_dataloaders, evaluate_ensemble, evaluate_loader, load_checkpoint
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", nargs="+", required=True)
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--data-root", default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, cfg = load_checkpoint(args.checkpoint, device)
+    models = []
+    cfg = None
+    for path in args.checkpoint:
+        model, loaded = load_checkpoint(path, device)
+        models.append(model)
+        cfg = loaded
+    assert cfg is not None
     if args.dataset:
         cfg["data"]["dataset"] = args.dataset
     if args.data_root:
         cfg["data"]["root"] = args.data_root
     loaders = build_dataloaders(cfg)
     names = DATASET_EMOTIONS.get(cfg["data"]["dataset"].lower(), [])
-    metrics = evaluate_loader(model, loaders[args.split], device, names)
+    tta = bool(cfg.get("train", {}).get("tta", False))
+    if len(models) == 1:
+        metrics = evaluate_loader(models[0], loaders[args.split], device, names, tta=tta)
+    else:
+        print(f"Ensemble of {len(models)} checkpoints")
+        metrics = evaluate_ensemble(models, loaders[args.split], device, names, tta=tta)
     print(metrics["report"])
-    out = Path(args.checkpoint).parent / f"eval_{args.split}.json"
+    print(
+        f"{args.split} window={metrics['accuracy']:.4f}  "
+        f"macro_f1={metrics['macro_f1']:.4f}  "
+        f"clip-majority={metrics.get('clip_accuracy')}"
+    )
+    out_dir = Path(args.checkpoint[0]).parent
+    out = out_dir / f"eval_{args.split}.json"
     out.write_text(
         json.dumps(
             {k: v for k, v in metrics.items() if k not in {"preds", "labels"}},

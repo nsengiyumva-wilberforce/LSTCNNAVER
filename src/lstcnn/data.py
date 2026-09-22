@@ -16,6 +16,33 @@ from lstcnn.constants import DATASET_EMOTIONS, RAVDESS_ID_TO_EMOTION, SAVEE_CODE
 from lstcnn.preprocess import apply_gaussian_noise
 
 
+def augment_face(face: np.ndarray) -> np.ndarray:
+    """Train-only flip and mild brightness on a 64×64 grayscale face."""
+    image = np.array(face, copy=True)
+    squeezed = False
+    if image.ndim == 3 and image.shape[0] == 1:
+        image = image[0]
+        squeezed = True
+    if np.random.rand() < 0.5:
+        image = np.ascontiguousarray(np.fliplr(image))
+    if np.random.rand() < 0.5:
+        image = np.clip(image * np.float32(np.random.uniform(0.9, 1.1)), 0.0, 1.0)
+    if squeezed:
+        image = image[None, ...]
+    return image.astype(np.float32)
+
+
+def augment_mfcc(vector: np.ndarray) -> np.ndarray:
+    """Train-only jitter and coefficient dropout on a z-scored 40-d MFCC."""
+    out = np.array(vector, copy=True, dtype=np.float32)
+    out = out + np.random.normal(0.0, 0.05, size=out.shape).astype(np.float32)
+    n_drop = int(np.random.randint(0, 4))
+    if n_drop:
+        idx = np.random.choice(out.shape[0], size=n_drop, replace=False)
+        out[idx] = 0.0
+    return out
+
+
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".aac"}
 
@@ -454,6 +481,10 @@ class AudioVisualDataset(Dataset):
         face = np.array(faces[part], copy=True)
         vector = np.array(mfcc[part], copy=True)
         vector = ((vector - self.mfcc_mean) / self.mfcc_std).astype(np.float32)
+        if self.augment and bool(self.cfg.get("face_aug", False)):
+            face = augment_face(face)
+        if self.augment and bool(self.cfg.get("mfcc_aug", False)):
+            vector = augment_mfcc(vector)
         if self.augment and self.face_noise_var > 0.0:
             # Keras GaussianNoise(0.01): stddev 0.01, a new draw each epoch.
             face = apply_gaussian_noise(face, self.face_noise_var)
